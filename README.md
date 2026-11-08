@@ -2,6 +2,10 @@
 
 Open a Roblox place in Studio, or join it in the client, from the command line: by its name in `rbxplace.toml`, by id, from a file on disk, or as a new place from a template.
 
+## Requirements
+
+Roblox Studio installed on the machine (or the Roblox app, for `--play`), on Windows or macOS. On Linux the link goes to `xdg-open`, so it works wherever something has registered the `roblox-studio:` scheme, and under WSL it reaches Studio on the Windows side.
+
 ## Install
 
 ```bash
@@ -86,7 +90,7 @@ Studio opens a place you are not allowed to edit as a detached copy: the window 
 roblox-studio:1+task:EditPlace+placeId:123456789+universeId:0
 ```
 
-That URI is handed to your system's Roblox Studio installation. On Windows it goes through `explorer`, and the tool waits for the hand-off, so a launcher that tears down its child processes on exit cannot kill it halfway. On Linux it goes to `xdg-open`, and if that is not there, or under WSL where Studio lives on the Windows side, it crosses to the Windows host through `powershell.exe Start-Process`, then `rundll32`, then `cmd.exe start`, then `wslview`.
+That URI is handed to your system's Roblox Studio installation. On Windows it goes through `explorer`, and the tool waits for the hand-off, so a launcher that tears down its child processes on exit cannot kill it halfway. On macOS it goes to `open`. On Linux it goes to `xdg-open`, and if that is not there, or under WSL where Studio lives on the Windows side, it crosses to the Windows host through `powershell.exe Start-Process`, then `rundll32`, then `cmd.exe start`, then `wslview`.
 
 ## Prior art
 
