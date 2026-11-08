@@ -8,12 +8,19 @@ Roblox Studio installed on the machine (or the Roblox app, for `--play`), on Win
 
 ## Install
 
-With [mise](https://mise.jdx.dev) or [Rokit](https://github.com/rojo-rbx/rokit), either of which pins the latest release in your project's config:
+With [mise](https://mise.jdx.dev):
 
 ```bash
 mise use --pin github:rbx-forge/rbx-open
-rokit add rbx-forge/rbx-open   # or, with Rokit
 ```
+
+Or with [Rokit](https://github.com/rojo-rbx/rokit):
+
+```bash
+rokit add rbx-forge/rbx-open
+```
+
+Either one pins the latest release in your project's config.
 
 Or take a binary for your platform from the [releases page](https://github.com/rbx-forge/rbx-open/releases), which ships a `SHA256SUMS` alongside the archives, or build from source:
 
