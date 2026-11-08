@@ -1,0 +1,11 @@
+/target
+
+# Editor/tool configs
+.idea/
+.vscode/
+.zed/
+.claude/
+
+# A real rbxplace.toml dropped here for a manual test names private places by
+# id. It belongs to a project, not to this repository.
+/rbxplace.toml

@@ -1,0 +1,54 @@
+[package]
+name = "rbx-open"
+version = "0.1.0"
+edition = "2021"
+# Set by a dependency, not by this crate's own sources: `image`, which arrives
+# through `rbx-core`, declares 1.88. It moves when a dependency moves it; the
+# `msrv` CI job is what stops it moving silently.
+rust-version = "1.88"
+license = "MPL-2.0"
+description = "Open a Roblox place in Studio, or join it in the client, from the command line"
+repository = "https://github.com/rbx-dev-tools/rbx-open"
+homepage = "https://github.com/rbx-dev-tools/rbx-open"
+authors = ["rbx-forge"]
+keywords = ["roblox", "studio", "cli", "place"]
+categories = ["command-line-utilities", "game-development"]
+readme = "README.md"
+# crates.io refuses a crate with a git dependency, and this one has one. The
+# binary ships through GitHub releases.
+publish = false
+
+[lib]
+name = "rbx_open"
+path = "src/lib.rs"
+
+[[bin]]
+name = "rbx-open"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive", "env"] }
+colored = "2"
+dialoguer = "0.11"
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+# `rbxplace.toml` parsing, the template and universe listings, and the HTTP
+# client they go through. A branch rather than a rev: Cargo.lock pins the exact
+# commit, and `cargo update -p rbx-core` is how a fix arrives.
+rbx-core = { git = "https://github.com/rbx-forge/rbx-cli", branch = "main" }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
+
+[lints.rust]
+unsafe_code = "warn"
+missing_debug_implementations = "warn"
+unused_qualifications = "warn"
+
+[lints.clippy]
+todo = "warn"
+dbg_macro = "warn"
+print_stdout = "allow"   # CLI tool, println! is intentional
+print_stderr = "allow"
