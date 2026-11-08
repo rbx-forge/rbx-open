@@ -11,14 +11,14 @@ Roblox Studio installed on the machine (or the Roblox app, for `--play`), on Win
 With [mise](https://mise.jdx.dev) or [Rokit](https://github.com/rojo-rbx/rokit), either of which pins the latest release in your project's config:
 
 ```bash
-mise use --pin github:rbx-dev-tools/rbx-open
-rokit add rbx-dev-tools/rbx-open   # or, with Rokit
+mise use --pin github:rbx-forge/rbx-open
+rokit add rbx-forge/rbx-open   # or, with Rokit
 ```
 
-Or take a binary for your platform from the [releases page](https://github.com/rbx-dev-tools/rbx-open/releases), which ships a `SHA256SUMS` alongside the archives, or build from source:
+Or take a binary for your platform from the [releases page](https://github.com/rbx-forge/rbx-open/releases), which ships a `SHA256SUMS` alongside the archives, or build from source:
 
 ```bash
-cargo install --git https://github.com/rbx-dev-tools/rbx-open --locked
+cargo install --git https://github.com/rbx-forge/rbx-open --locked
 ```
 
 ## Quick start
