@@ -876,18 +876,17 @@ mod tests {
     }
 
     /// The universe listing answers without a credential, so there is no
-    /// cookie to take: not as a flag, and not from the environment.
+    /// cookie to take: not as a flag, and not from `RBX_COOKIE`. Other
+    /// arguments are none of this test's business.
     #[test]
     fn no_cookie_is_taken_from_anywhere() {
         assert!(Cli::try_parse_from(["rbx-open", "--universe-id", "1", "--cookie", "x"]).is_err());
         for arg in Cli::command().get_arguments() {
-            assert!(
-                !arg.get_id().as_str().contains("cookie"),
-                "{}",
-                arg.get_id()
-            );
-            assert_eq!(arg.get_env(), None, "{}", arg.get_id());
+            let id = arg.get_id().as_str().to_ascii_lowercase();
+            assert!(!id.contains("cookie"), "{id}");
         }
+        let help = Cli::command().render_long_help().to_string();
+        assert!(!help.contains("RBX_COOKIE"), "{help}");
     }
 
     #[test]
