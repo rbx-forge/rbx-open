@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Removed
+
+- `--cookie` and `RBX_COOKIE`. The value was sent as the whole `Cookie` header, without `.ROBLOSECURITY=`, so it authenticated nothing, and the `--universe-id` listing it was for answers without a credential.
+
 ### Fixed
 
 - A launcher that fails is an error, with a non-zero exit, instead of a success line. macOS waits for `open` and reads its exit code; on Linux and WSL a route that exits non-zero counts as one that did not work, so the next is tried. On Windows a failure to start `explorer.exe` is reported; its exit code is not read, since it exits 1 after a hand-off that worked.

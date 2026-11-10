@@ -101,16 +101,6 @@ pub struct Cli {
     /// Path to `rbxplace.toml`, the file `<env> <place>` is resolved in.
     #[arg(long, default_value = "rbxplace.toml")]
     pub places: PathBuf,
-
-    /// Roblox session cookie (`.ROBLOSECURITY`), sent with the `--universe-id`
-    /// listing only. That listing answers without one; this is for a universe
-    /// that does not.
-    ///
-    /// Taken only from here or `RBX_COOKIE`: a signed-in Studio is never looked
-    /// up, because borrowing a full-account credential for a call that answers
-    /// anonymously is a bad trade to offer.
-    #[arg(long, env = "RBX_COOKIE", hide_env_values = true)]
-    pub cookie: Option<String>,
 }
 
 /// Which app a place is opened in.
@@ -235,12 +225,13 @@ pub async fn run(cli: Cli) -> Result<()> {
 
     // The listing needs no credential (see `rbx_core::universe`), so this path
     // works in a bare directory, which is the point: adopting somebody else's
-    // universe id is exactly when there is no project to read.
+    // universe id is exactly when there is no project to read. None is sent,
+    // and none is asked for.
     if let Some(universe_id) = cli.universe_id {
         let places = rbx_core::universe::list_places(
             &rbx_core::api::build_client(),
             &ApiBase::new(DEVELOP_HOST),
-            cli.cookie.as_deref(),
+            None,
             universe_id,
         )
         .await?;
@@ -872,6 +863,21 @@ mod tests {
 
         let cli = Cli::try_parse_from(["rbx-open", "x", "--places", "config/places.toml"]).unwrap();
         assert_eq!(cli.places, PathBuf::from("config/places.toml"));
+    }
+
+    /// The universe listing answers without a credential, so there is no
+    /// cookie to take: not as a flag, and not from the environment.
+    #[test]
+    fn no_cookie_is_taken_from_anywhere() {
+        assert!(Cli::try_parse_from(["rbx-open", "--universe-id", "1", "--cookie", "x"]).is_err());
+        for arg in Cli::command().get_arguments() {
+            assert!(
+                !arg.get_id().as_str().contains("cookie"),
+                "{}",
+                arg.get_id()
+            );
+            assert_eq!(arg.get_env(), None, "{}", arg.get_id());
+        }
     }
 
     #[test]
