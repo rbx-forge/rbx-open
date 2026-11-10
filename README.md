@@ -85,6 +85,12 @@ The signed-in Studio account has no edit rights on that place, and Studio opened
 
 The tool hands Studio a `roblox-studio:1+task:EditPlace+placeId:<id>` link: through `explorer.exe` on Windows, `open` on macOS, `xdg-open` on Linux (and the Windows side under WSL). A file on disk is recognised by its extension and passed to the system's opener.
 
+A failure it can see is an error with a non-zero exit, and some failures it cannot see:
+
+- On Windows, `explorer.exe` failing to start is an error, but its exit code is not read: it is 1 after a hand-off that worked too, so a missing Studio goes unnoticed.
+- On macOS and Linux, `open` and `xdg-open` report a link or file they cannot open, and that is an error.
+- Under WSL, PowerShell's `Start-Process` is tried first, then `wslview`, then `rundll32.exe`. If all of them fail, the error lists each program and how it ended. `rundll32.exe` exits 0 whatever happens, so when it is the one that took the link, the tool says it handed the place to Windows, not that it opened it. How `rundll32.exe` handles a path with spaces is untested.
+
 ## Prior art
 
 [ROpen](https://github.com/Barocena/ROpen) (Luau, MPL-2.0), which this tool comes from, and [rojo-rbx/edit-roblox-place](https://github.com/rojo-rbx/edit-roblox-place) (Rust, MIT), which sent the same link in 2019. What this adds is opening places by name. No code from either is reused.
