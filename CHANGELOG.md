@@ -9,6 +9,7 @@
 ### Security
 
 - On Windows the place is handed to `explorer.exe` by its full path in the Windows directory (`SystemRoot`), with no shell in between, so an `explorer.bat` or `explorer.exe` in the current directory is never run in its place. macOS starts `/usr/bin/open` the same way.
+- Under WSL the target reaches PowerShell through an environment variable shared with `WSLENV`, never inside the command PowerShell parses. A file name holding a quote PowerShell closes a string on (`'`, or U+2018 to U+201B) can no longer run as code.
 - Release archives carry a build provenance attestation: `gh attestation verify <zip> --repo rbx-forge/rbx-open`. The build jobs run with read access only, and the publishing job alone may write.
 
 ## [0.1.0] - 2026-11-08
