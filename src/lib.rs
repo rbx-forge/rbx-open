@@ -569,7 +569,10 @@ fn launch(target: &str) -> Result<Handoff> {
         // A shell (`cmd /C explorer ...`) looks in the current directory before
         // anywhere else, so an `explorer.bat` in a cloned project would run in
         // its place.
-        let explorer = explorer_exe(std::env::var("SystemRoot").ok().as_deref());
+        let explorer = explorer_exe(
+            std::env::var("SystemRoot").ok().as_deref(),
+            std::env::var("WINDIR").ok().as_deref(),
+        )?;
         start_explorer(&explorer, uri)?;
         Handoff::Opened
     };
@@ -640,28 +643,30 @@ fn handed_off(program: &str, status: std::io::Result<std::process::ExitStatus>) 
 #[cfg(any(target_os = "macos", test))]
 const MACOS_OPEN: &str = "/usr/bin/open";
 
-/// Where `explorer.exe` is, from the `SystemRoot` environment variable.
+/// Where `explorer.exe` is: in the Windows directory, named by `SystemRoot`,
+/// or by `WINDIR` when `SystemRoot` is missing, empty or not absolute.
 ///
-/// A valid `SystemRoot` gives the full path. A value that is missing, empty or
-/// not absolute gives the bare name instead, never a guessed drive: Windows
-/// is not always on `C:`, and a relative root would put the current directory
-/// back in front.
-///
-/// The bare name is safe because no shell resolves it. Rust's
-/// `Command::new` on Windows resolves a name that is not absolute itself,
-/// searching in order: the child's `PATH` if set explicitly (it is not here),
-/// the directory of the running executable, the system directory, the
-/// Windows directory, then the parent's `PATH`. The current directory is not
-/// on that list (std `Command::new`, "Platform-specific behavior").
-/// `explorer.exe` is found in the Windows directory.
+/// Always a full path, never a guessed drive (Windows is not always on `C:`)
+/// and never the bare name. Rust's `Command::new` on Windows resolves a bare
+/// name itself, and the first place it looks, ahead of the system and
+/// Windows directories, is the directory of the running executable (std
+/// `Command::new`, "Platform-specific behavior"): an `explorer.exe` dropped
+/// beside `rbx-open.exe` would run instead. A relative value is refused for
+/// the same reason, since it would be resolved against the current
+/// directory. With neither variable usable, launching is an error.
 #[cfg(any(target_os = "windows", test))]
-fn explorer_exe(system_root: Option<&str>) -> String {
-    match system_root
-        .map(|root| root.trim_end_matches(['\\', '/']))
-        .filter(|root| is_absolute_windows_path(root))
-    {
-        Some(root) => format!(r"{root}\explorer.exe"),
-        None => "explorer.exe".to_string(),
+fn explorer_exe(system_root: Option<&str>, windir: Option<&str>) -> Result<String> {
+    let usable = |root: Option<&str>| {
+        root.map(|root| root.trim_end_matches(['\\', '/']))
+            .filter(|root| is_absolute_windows_path(root))
+            .map(str::to_string)
+    };
+    match usable(system_root).or_else(|| usable(windir)) {
+        Some(root) => Ok(format!(r"{root}\explorer.exe")),
+        None => bail!(
+            "Cannot find explorer.exe: neither SystemRoot nor WINDIR names an absolute \
+             Windows directory. Set SystemRoot (usually C:\\Windows) and try again."
+        ),
     }
 }
 
@@ -1088,32 +1093,51 @@ mod tests {
         }
     }
 
+    const UNUSABLE_ROOTS: [Option<&str>; 5] = [
+        None,
+        Some(""),
+        Some("Windows"),
+        Some(r".\Windows"),
+        Some("C:"),
+    ];
+
     /// A bare `explorer`, or one found through a shell, can be an
-    /// `explorer.bat` sitting in the current directory.
+    /// `explorer.bat` in the current directory or an `explorer.exe` beside
+    /// `rbx-open.exe`.
     #[test]
     fn explorer_is_started_by_its_full_path() {
         assert_eq!(
-            explorer_exe(Some(r"D:\Windows")),
+            explorer_exe(Some(r"D:\Windows"), Some(r"E:\Other")).unwrap(),
             r"D:\Windows\explorer.exe"
         );
         assert_eq!(
-            explorer_exe(Some(r"C:\WINDOWS\")),
+            explorer_exe(Some(r"C:\WINDOWS\"), None).unwrap(),
             r"C:\WINDOWS\explorer.exe"
         );
     }
 
     #[test]
-    fn a_missing_or_relative_system_root_falls_back_to_the_bare_name() {
-        // No drive is guessed: Windows is not always on `C:`. std resolves the
-        // bare name without ever searching the current directory.
-        for root in [
-            None,
-            Some(""),
-            Some("Windows"),
-            Some(r".\Windows"),
-            Some("C:"),
-        ] {
-            assert_eq!(explorer_exe(root), "explorer.exe", "{root:?}");
+    fn windir_stands_in_for_an_unusable_system_root() {
+        for root in UNUSABLE_ROOTS {
+            assert_eq!(
+                explorer_exe(root, Some(r"D:\Windows")).unwrap(),
+                r"D:\Windows\explorer.exe",
+                "{root:?}"
+            );
+        }
+    }
+
+    /// No drive is guessed (Windows is not always on `C:`) and no bare name
+    /// is tried (std looks beside the running executable first).
+    #[test]
+    fn with_neither_variable_usable_launching_is_an_error() {
+        for root in UNUSABLE_ROOTS {
+            for windir in UNUSABLE_ROOTS {
+                let error = explorer_exe(root, windir).expect_err("nothing to go on");
+                let message = error.to_string();
+                assert!(message.contains("SystemRoot"), "{message}");
+                assert!(message.contains("WINDIR"), "{message}");
+            }
         }
     }
 
