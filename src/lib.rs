@@ -159,12 +159,9 @@ pub async fn run(cli: Cli) -> Result<()> {
                 path.display()
             );
         }
-        open_file(&path)?;
-        println!(
-            "{} Opening {}",
-            "\u{2713}".green(),
-            path.display().to_string().cyan()
-        );
+        let handoff = open_file(&path)?;
+        let what = path.display().to_string().cyan().to_string();
+        println!("{}", success_line(handoff, "Opening", &what));
         return Ok(());
     }
 
@@ -193,20 +190,12 @@ pub async fn run(cli: Cli) -> Result<()> {
             }
         };
 
-        open_place(place_id, OpenIn::Studio)?;
-        match name {
-            Some(name) => println!(
-                "{} Opening a new {} place (template {})",
-                "\u{2713}".green(),
-                name.cyan(),
-                place_id
-            ),
-            None => println!(
-                "{} Opening a new place from template {}",
-                "\u{2713}".green(),
-                place_id.to_string().cyan()
-            ),
-        }
+        let handoff = open_place(place_id, OpenIn::Studio)?;
+        let what = match name {
+            Some(name) => format!("a new {} place (template {})", name.cyan(), place_id),
+            None => format!("a new place from template {}", place_id.to_string().cyan()),
+        };
+        println!("{}", success_line(handoff, "Opening", &what));
         // Said out loud because the window looks exactly like an opened place.
         // Studio loads the template's content and then sets the session's place
         // id back to 0, so there is nothing on Roblox for a save to go to yet.
@@ -220,8 +209,9 @@ pub async fn run(cli: Cli) -> Result<()> {
     let open_in = OpenIn::of(cli.play);
 
     if let Some(place_id) = cli.place_id {
-        open_place(place_id, open_in)?;
-        println!("{} {} place {}", "✓".green(), open_in.verb(), place_id);
+        let handoff = open_place(place_id, open_in)?;
+        let what = format!("place {place_id}");
+        println!("{}", success_line(handoff, open_in.verb(), &what));
         return Ok(());
     }
 
@@ -239,14 +229,9 @@ pub async fn run(cli: Cli) -> Result<()> {
         .await?;
 
         let chosen = pick_universe_place(universe_id, &places)?;
-        open_place(chosen.id, open_in)?;
-        println!(
-            "{} {} {} (place {})",
-            "✓".green(),
-            open_in.verb(),
-            label(chosen).cyan(),
-            chosen.id
-        );
+        let handoff = open_place(chosen.id, open_in)?;
+        let what = format!("{} (place {})", label(chosen).cyan(), chosen.id);
+        println!("{}", success_line(handoff, open_in.verb(), &what));
         return Ok(());
     }
 
@@ -260,15 +245,14 @@ pub async fn run(cli: Cli) -> Result<()> {
 
     let (place_name, place_id) = resolve_place(&env_name, env, cli.place)?;
 
-    open_place(place_id, open_in)?;
-    println!(
-        "{} {} {}/{} (place {})",
-        "✓".green(),
-        open_in.verb(),
+    let handoff = open_place(place_id, open_in)?;
+    let what = format!(
+        "{}/{} (place {})",
         env_name.cyan(),
         place_name.cyan(),
         place_id
     );
+    println!("{}", success_line(handoff, open_in.verb(), &what));
 
     Ok(())
 }
@@ -470,7 +454,7 @@ fn new_target(
     Ok(None)
 }
 
-fn open_place(place_id: u64, open_in: OpenIn) -> Result<()> {
+fn open_place(place_id: u64, open_in: OpenIn) -> Result<Handoff> {
     launch(&place_uri(place_id, open_in))
 }
 
@@ -500,7 +484,7 @@ fn place_uri(place_id: u64, open_in: OpenIn) -> String {
 /// logs `createAndShowIDEDoc with task EditFile` either way.
 ///
 /// Absolute, because the opener does not inherit our working directory.
-fn open_file(path: &Path) -> Result<()> {
+fn open_file(path: &Path) -> Result<Handoff> {
     if !path.is_file() {
         bail!("No such place file: {}", path.display());
     }
@@ -542,13 +526,36 @@ fn without_verbatim_prefix(path: &str) -> String {
     path.to_string()
 }
 
+/// How much a launch that did not fail can claim.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Handoff {
+    /// The opener took the target and did not report a failure.
+    Opened,
+    /// The target reached Windows through `rundll32.exe`, which exits 0
+    /// whatever happens next: whether anything opened it is unknown.
+    #[cfg_attr(not(any(target_os = "linux", test)), allow(dead_code))]
+    HandedToWindows,
+}
+
+/// The line printed once a launch did not fail. `what` names the place.
+fn success_line(handoff: Handoff, verb: &str, what: &str) -> String {
+    match handoff {
+        Handoff::Opened => format!("{} {verb} {what}", "\u{2713}".green()),
+        Handoff::HandedToWindows => format!(
+            "{} Handed {what} to Windows\n  rundll32.exe cannot tell whether anything opened \
+             it: if nothing appears, check that Roblox is installed on the Windows side.",
+            "\u{2713}".green()
+        ),
+    }
+}
+
 /// Hand one target (a `roblox-studio:` or `roblox:` URI, or a path) to the
 /// desktop.
-fn launch(target: &str) -> Result<()> {
+fn launch(target: &str) -> Result<Handoff> {
     let uri = target;
 
     #[cfg(target_os = "windows")]
-    {
+    let handoff = {
         // Hand the URI to `explorer`, which delegates protocol-URI launches to
         // the running desktop shell, and WAIT for it to finish before
         // returning. Both details matter when this tool runs under a launcher
@@ -564,19 +571,21 @@ fn launch(target: &str) -> Result<()> {
         // its place.
         let explorer = explorer_exe(std::env::var("SystemRoot").ok().as_deref());
         start_explorer(&explorer, uri)?;
-    }
+        Handoff::Opened
+    };
 
     #[cfg(target_os = "macos")]
-    {
+    let handoff = {
         // By its full path, like `explorer.exe` on Windows: `open` is part of
         // macOS and always lives there, so a `PATH` lookup can only find
         // something else. Waited for, and its exit code believed: `open` exits
         // 1 when nothing is registered for the link or the file is missing.
         handed_off(MACOS_OPEN, Command::new(MACOS_OPEN).arg(uri).status())?;
-    }
+        Handoff::Opened
+    };
 
     #[cfg(target_os = "linux")]
-    {
+    let handoff = {
         // Studio has no Linux build, so a Linux build of this tool is either
         // running under WSL (where the target has to cross to the Windows host)
         // or has nothing to launch at all. `xdg-open` is tried first anyway: a
@@ -585,14 +594,17 @@ fn launch(target: &str) -> Result<()> {
         let mut tried = Vec::new();
         if !is_wsl() {
             match first_route_that_works(&[Route::new(&["xdg-open"], &[uri])], run_route) {
-                Ok(_) => return Ok(()),
+                Ok(route) => return Ok(route.handoff()),
                 Err(outcomes) => tried = outcomes,
             }
         }
-        open_on_windows_host(uri, tried)?;
-    }
+        open_on_windows_host(uri, tried)?
+    };
 
-    Ok(())
+    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+    let handoff: Handoff = bail!("Nothing on this platform can open {uri}.");
+
+    Ok(handoff)
 }
 
 /// Start `explorer.exe` on one target and wait for it to hand the target off.
@@ -706,6 +718,10 @@ struct Route {
     programs: Vec<&'static str>,
     args: Vec<String>,
     env: Vec<(&'static str, OsString)>,
+    /// Whether its exit code says the target was opened. `rundll32.exe`
+    /// exits 0 whatever happens to the hand-off, so a success through it
+    /// only says the target reached Windows.
+    reports_failure: bool,
 }
 
 #[cfg(any(target_os = "linux", test))]
@@ -715,6 +731,16 @@ impl Route {
             programs: programs.to_vec(),
             args: args.iter().map(|arg| arg.to_string()).collect(),
             env: Vec::new(),
+            reports_failure: true,
+        }
+    }
+
+    /// What a success through this route can claim.
+    fn handoff(&self) -> Handoff {
+        if self.reports_failure {
+            Handoff::Opened
+        } else {
+            Handoff::HandedToWindows
         }
     }
 }
@@ -857,18 +883,20 @@ fn windows_host_routes(target: &str, is_file: bool, wslenv: Option<&OsStr>) -> V
         ("WSLENV", wslenv_with_target(wslenv)),
     ];
 
+    // Last, because it cannot fail: `rundll32.exe` exits 0 whether or not
+    // anything opened the target, so every route that can say "no" goes
+    // first. How it handles a path with spaces is untested.
+    let mut rundll32 = Route::new(
+        &["rundll32.exe", "/mnt/c/Windows/System32/rundll32.exe"],
+        &["url.dll,FileProtocolHandler", target],
+    );
+    rundll32.reports_failure = false;
+
     // No `cmd.exe /c start` route: cmd reads `&`, `|`, `^` and `%` in the
     // target as its own syntax, which a file name can hold. It would add
     // nothing besides: cmd.exe sits beside rundll32.exe in System32, under
     // the same two names, so when one is out of reach so is the other.
-    vec![
-        powershell,
-        Route::new(
-            &["rundll32.exe", "/mnt/c/Windows/System32/rundll32.exe"],
-            &["url.dll,FileProtocolHandler", target],
-        ),
-        Route::new(&["wslview"], &[target]),
-    ]
+    vec![powershell, Route::new(&["wslview"], &[target]), rundll32]
 }
 
 /// Cross from WSL to the Windows host, which is where Studio actually lives,
@@ -878,7 +906,7 @@ fn windows_host_routes(target: &str, is_file: bool, wslenv: Option<&OsStr>) -> V
 /// Independent implementation; the gap it closes was
 /// pointed out by ROpen 1.3.2, which fixed the same thing in Luau.
 #[cfg(target_os = "linux")]
-fn open_on_windows_host(target: &str, mut tried: Vec<String>) -> Result<()> {
+fn open_on_windows_host(target: &str, mut tried: Vec<String>) -> Result<Handoff> {
     // A Linux path means nothing to a Windows program. A `roblox-studio:` URI
     // is not a path and must be handed over untouched. `open_file` passes an
     // absolute path, so a leading `/` is what tells the two apart.
@@ -901,7 +929,7 @@ fn open_on_windows_host(target: &str, mut tried: Vec<String>) -> Result<()> {
     let wslenv = std::env::var_os("WSLENV");
     let routes = windows_host_routes(&target, is_file, wslenv.as_deref());
     match first_route_that_works(&routes, run_route) {
-        Ok(_) => Ok(()),
+        Ok(route) => Ok(route.handoff()),
         Err(outcomes) => {
             tried.extend(outcomes);
             Err(no_route_worked(&tried))
@@ -1136,9 +1164,25 @@ mod tests {
     #[test]
     fn a_program_that_ran_and_failed_is_not_started_again_by_its_full_path() {
         let routes = windows_host_routes("roblox-studio:1", false, None);
-        let (outcome, started) = simulate(&routes, |_| Ok(exit_status(1)));
+        let (outcome, started) = simulate(&routes, |program| {
+            // rundll32.exe exits 0 whatever happens; a real failure through
+            // it does not exist, so it is not asked to fail here.
+            if program == "rundll32.exe" {
+                Err(not_found())
+            } else {
+                Ok(exit_status(1))
+            }
+        });
         assert!(outcome.is_err());
-        assert_eq!(started, ["powershell.exe", "rundll32.exe", "wslview"]);
+        assert_eq!(
+            started,
+            [
+                "powershell.exe",
+                "wslview",
+                "rundll32.exe",
+                "/mnt/c/Windows/System32/rundll32.exe"
+            ]
+        );
     }
 
     /// The same for a program that exists and could not be started: only
@@ -1152,7 +1196,44 @@ mod tests {
                 "denied",
             ))
         });
-        assert_eq!(started, ["powershell.exe", "rundll32.exe", "wslview"]);
+        assert_eq!(started, ["powershell.exe", "wslview", "rundll32.exe"]);
+    }
+
+    /// `rundll32.exe` exits 0 whatever happens, so it comes after every route
+    /// that can report a failure.
+    #[test]
+    fn rundll32_is_the_last_resort() {
+        let routes = windows_host_routes("roblox-studio:1", false, None);
+        let (last, others) = routes.split_last().expect("routes");
+        assert_eq!(last.programs[0], "rundll32.exe");
+        assert_eq!(last.handoff(), Handoff::HandedToWindows);
+        for route in others {
+            assert_eq!(route.handoff(), Handoff::Opened, "{:?}", route.programs);
+        }
+    }
+
+    /// A success through rundll32.exe says the place reached Windows, not
+    /// that it opened: a missing Studio exits 0 just the same.
+    #[test]
+    fn a_hand_off_through_rundll32_does_not_claim_the_place_opened() {
+        let routes = windows_host_routes("roblox-studio:1", false, None);
+        let (outcome, _) = simulate(&routes, |program| match program {
+            "powershell.exe" => Ok(exit_status(1)),
+            "rundll32.exe" => Ok(exit_status(0)),
+            _ => Err(not_found()),
+        });
+        assert_eq!(outcome.expect("rundll32.exe took it")[0], "rundll32.exe");
+        let route = routes.last().expect("routes");
+        let line = success_line(route.handoff(), "Opening", "place 123");
+        assert!(line.contains("Handed place 123 to Windows"), "{line}");
+        assert!(!line.contains("Opening"), "{line}");
+    }
+
+    #[test]
+    fn a_route_that_reports_failure_says_the_place_opened() {
+        let line = success_line(Handoff::Opened, "Opening", "place 123");
+        assert!(line.contains("Opening place 123"), "{line}");
+        assert!(!line.contains("Windows"), "{line}");
     }
 
     #[test]
