@@ -8,7 +8,7 @@
 
 ### Fixed
 
-- Under WSL a place file whose name holds `[`, `]`, `*`, `?` or a backtick opens that file, not another one its name matches as a pattern (`place[1].rbxl` opened `place1.rbxl`). The path is escaped before `Start-Process` reads it; a link is passed unescaped.
+- Under WSL a place file whose name holds `[`, `]`, `*`, `?` or a backtick opens that file, not another one its name matches as a pattern (`place[1].rbxl` opened `place1.rbxl`). A file is opened with `Invoke-Item -LiteralPath`, which reads its name as it is; `Start-Process` is kept for links.
 - A launcher that fails is an error, with a non-zero exit, instead of a success line. macOS waits for `open` and reads its exit code; on Linux and WSL a route that exits non-zero counts as one that did not work, so the next is tried. On Windows a failure to start `explorer.exe` is reported; its exit code is not read, since it exits 1 after a hand-off that worked.
 - Under WSL a program that started and failed is not started a second time under its full `/mnt/c` path: that path is tried only when the bare name is not found.
 - Under WSL `rundll32.exe` is the last route tried, after PowerShell, since it exits 0 whether or not anything opened the place. When it is the one that took it, the success line says the place was handed to Windows, not that it opened.
