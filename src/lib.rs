@@ -892,11 +892,14 @@ fn windows_host_routes(target: &str, is_file: bool, wslenv: Option<&OsStr>) -> V
     );
     rundll32.reports_failure = false;
 
-    // No `cmd.exe /c start` route: cmd reads `&`, `|`, `^` and `%` in the
-    // target as its own syntax, which a file name can hold. It would add
-    // nothing besides: cmd.exe sits beside rundll32.exe in System32, under
-    // the same two names, so when one is out of reach so is the other.
-    vec![powershell, Route::new(&["wslview"], &[target]), rundll32]
+    // No route through a shell. `cmd.exe /c start` reads `&`, `|`, `^` and
+    // `%` in the target as its own syntax, which a file name can hold, and
+    // would add nothing: cmd.exe sits beside rundll32.exe in System32, under
+    // the same two names. `wslview` is a shell script that splices its
+    // argument into a powershell.exe or cmd.exe command line, the parsing
+    // the PowerShell route avoids, and it expects a Linux path, not the
+    // Windows one this function is given.
+    vec![powershell, rundll32]
 }
 
 /// Cross from WSL to the Windows host, which is where Studio actually lives,
@@ -1120,17 +1123,28 @@ mod tests {
         }
     }
 
-    /// A shell would read `&` in `a&b.rbxl` as "then run b.rbxl". Only
-    /// PowerShell runs, and it gets the target as a variable.
+    /// A shell would read `&` in `a&b.rbxl` as "then run b.rbxl", and so
+    /// would a script that builds a command line out of its argument
+    /// (`wslview`). Only programs known to take the target as data may be
+    /// routes: an allowlist, so a new route has to be argued for here.
     #[test]
     fn no_route_hands_the_target_to_a_shell() {
         let target = r"\\wsl.localhost\Ubuntu\home\dev\a&b^c%PATH%.rbxl";
-        for route in windows_host_routes(target, true, None) {
-            for program in &route.programs {
-                let program = program.to_ascii_lowercase();
-                assert!(!program.ends_with("cmd.exe"), "{program}");
-                if program.ends_with("powershell.exe") {
-                    assert!(!route.args.iter().any(|arg| arg.contains(target)));
+        for is_file in [true, false] {
+            for route in windows_host_routes(target, is_file, None) {
+                for program in &route.programs {
+                    let name = program.rsplit('/').next().unwrap_or(program);
+                    match name.to_ascii_lowercase().as_str() {
+                        // The target only ever in the environment.
+                        "powershell.exe" => {
+                            assert!(!route.args.iter().any(|arg| arg.contains(target)));
+                        }
+                        // The target as an argument of its own, no shell.
+                        "rundll32.exe" => {
+                            assert_eq!(route.args.last().map(String::as_str), Some(target));
+                        }
+                        other => panic!("{other} is not known to take the target as data"),
+                    }
                 }
             }
         }
@@ -1178,7 +1192,6 @@ mod tests {
             started,
             [
                 "powershell.exe",
-                "wslview",
                 "rundll32.exe",
                 "/mnt/c/Windows/System32/rundll32.exe"
             ]
@@ -1196,7 +1209,7 @@ mod tests {
                 "denied",
             ))
         });
-        assert_eq!(started, ["powershell.exe", "wslview", "rundll32.exe"]);
+        assert_eq!(started, ["powershell.exe", "rundll32.exe"]);
     }
 
     /// `rundll32.exe` exits 0 whatever happens, so it comes after every route
@@ -1257,7 +1270,7 @@ mod tests {
         let routes = windows_host_routes("roblox-studio:1", false, None);
         let (outcome, _) = simulate(&routes, |program| match program {
             "powershell.exe" => Ok(exit_status(1)),
-            "wslview" => Err(std::io::Error::new(
+            "/mnt/c/Windows/System32/rundll32.exe" => Err(std::io::Error::new(
                 std::io::ErrorKind::PermissionDenied,
                 "denied",
             )),
@@ -1268,8 +1281,7 @@ mod tests {
         for expected in [
             format!("powershell.exe: {}", exit_status(1)),
             "rundll32.exe: not found".to_string(),
-            "/mnt/c/Windows/System32/rundll32.exe: not found".to_string(),
-            "wslview: could not start (denied)".to_string(),
+            "/mnt/c/Windows/System32/rundll32.exe: could not start (denied)".to_string(),
         ] {
             assert!(message.contains(&expected), "{expected:?} in {message}");
         }

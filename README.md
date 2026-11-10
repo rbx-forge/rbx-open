@@ -89,7 +89,7 @@ A failure it can see is an error with a non-zero exit, and some failures it cann
 
 - On Windows, `explorer.exe` failing to start is an error, but its exit code is not read: it is 1 after a hand-off that worked too, so a missing Studio goes unnoticed.
 - On macOS and Linux, `open` and `xdg-open` report a link or file they cannot open, and that is an error.
-- Under WSL, PowerShell's `Start-Process` is tried first, then `wslview`, then `rundll32.exe`. If all of them fail, the error lists each program and how it ended. `rundll32.exe` exits 0 whatever happens, so when it is the one that took the link, the tool says it handed the place to Windows, not that it opened it. How `rundll32.exe` handles a path with spaces is untested.
+- Under WSL, PowerShell is tried first, then `rundll32.exe`. If all of them fail, the error lists each program and how it ended. `rundll32.exe` exits 0 whatever happens, so when it is the one that took the link, the tool says it handed the place to Windows, not that it opened it. How `rundll32.exe` handles a path with spaces is untested.
 
 ## Prior art
 
