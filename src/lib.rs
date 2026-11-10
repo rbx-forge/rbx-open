@@ -798,21 +798,40 @@ fn run_route(program: &str, route: &Route) -> std::io::Result<std::process::Exit
         .status()
 }
 
-/// The error once every route has failed, with what each one did: "could not
-/// reach Studio" alone leaves the reader to guess which of five programs to
-/// look at.
+/// The error once every route has failed, naming what `target` was meant to
+/// reach and what each route did: "could not reach Studio" alone leaves the
+/// reader to guess which program to look at, and is wrong for `--play`.
+///
+/// `target` is as `launch` got it: one of the links `place_uri` builds, or
+/// the path of a file.
 #[cfg(any(target_os = "linux", test))]
-fn no_route_worked(tried: &[String]) -> anyhow::Error {
-    let mut message = String::from("Could not reach Roblox Studio from this Linux. Tried:");
+fn no_route_worked(target: &str, tried: &[String]) -> anyhow::Error {
+    let (headline, app) = if target.starts_with("roblox-studio:") {
+        (
+            "Could not reach Roblox Studio from this Linux.".to_string(),
+            "Studio",
+        )
+    } else if target.starts_with("roblox:") {
+        (
+            "Could not reach the Roblox Player from this Linux.".to_string(),
+            "the Roblox Player",
+        )
+    } else {
+        (
+            format!("Could not open {target} from this Linux."),
+            "Studio",
+        )
+    };
+    let mut message = format!("{headline} Tried:");
     for line in tried {
         message.push_str("\n  ");
         message.push_str(line);
     }
-    message.push_str(
-        "\nOutside WSL, `xdg-open` needs an app registered for the link: Studio has no \
-         native Linux build. Under WSL, check that interop is enabled and that Studio is \
-         installed on the Windows side.",
-    );
+    message.push_str(&format!(
+        "\nOutside WSL, `xdg-open` needs an app registered for it: {app} has no native \
+         Linux build. Under WSL, check that interop is enabled and that {app} is installed \
+         on the Windows side."
+    ));
     anyhow::anyhow!(message)
 }
 
@@ -956,6 +975,7 @@ fn open_on_windows_host(target: &str, mut tried: Vec<String>) -> Result<Handoff>
     // A Linux path means nothing to a Windows program. A `roblox-studio:` URI
     // is not a path and must be handed over untouched. `open_file` passes an
     // absolute path, so a leading `/` is what tells the two apart.
+    let original = target;
     let is_file = target.starts_with('/');
     let target = if is_file {
         Command::new("wslpath")
@@ -978,7 +998,7 @@ fn open_on_windows_host(target: &str, mut tried: Vec<String>) -> Result<Handoff>
         Ok(route) => Ok(route.handoff()),
         Err(outcomes) => {
             tried.extend(outcomes);
-            Err(no_route_worked(&tried))
+            Err(no_route_worked(original, &tried))
         }
     }
 }
@@ -1339,7 +1359,7 @@ mod tests {
             _ => Err(not_found()),
         });
         let tried = outcome.expect_err("every route failed");
-        let message = no_route_worked(&tried).to_string();
+        let message = no_route_worked("roblox-studio:1", &tried).to_string();
         for expected in [
             format!("powershell.exe: {}", exit_status(1)),
             "rundll32.exe: not found".to_string(),
@@ -1347,6 +1367,31 @@ mod tests {
         ] {
             assert!(message.contains(&expected), "{expected:?} in {message}");
         }
+    }
+
+    /// `--play` reaches the Player, not Studio, and a file is named as the
+    /// file it is.
+    #[test]
+    fn the_error_names_what_it_was_trying_to_reach() {
+        let tried = ["powershell.exe: not found".to_string()];
+        let studio = no_route_worked(&place_uri(1, OpenIn::Studio), &tried).to_string();
+        assert!(
+            studio.starts_with("Could not reach Roblox Studio"),
+            "{studio}"
+        );
+
+        let player = no_route_worked(&place_uri(1, OpenIn::Player), &tried).to_string();
+        assert!(
+            player.starts_with("Could not reach the Roblox Player"),
+            "{player}"
+        );
+        assert!(!player.contains("Studio"), "{player}");
+
+        let file = no_route_worked("/home/dev/place.rbxl", &tried).to_string();
+        assert!(
+            file.starts_with("Could not open /home/dev/place.rbxl"),
+            "{file}"
+        );
     }
 
     #[test]
