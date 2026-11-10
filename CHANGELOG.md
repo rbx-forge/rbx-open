@@ -14,7 +14,7 @@
 ### Security
 
 - On Windows the place is handed to `explorer.exe` with no shell in between, so an `explorer.bat` or `explorer.exe` in the current directory is never run in its place. It is started by its full path in the Windows directory (`SystemRoot`), or by its bare name when `SystemRoot` is missing or not absolute, a lookup that never searches the current directory. macOS starts `/usr/bin/open` the same way.
-- Under WSL the target reaches PowerShell through an environment variable shared with `WSLENV`, never inside the command PowerShell parses. A file name holding a quote PowerShell closes a string on (`'`, or U+2018 to U+201B) can no longer run as code.
+- Under WSL the target reaches PowerShell through an environment variable shared with `WSLENV`, never inside the command PowerShell parses. A file name holding a quote PowerShell closes a string on (`'`, or U+2018 to U+201B) can no longer run as code. The user's own `WSLENV` is kept as it is, including a value that is not UTF-8.
 - Under WSL no route goes through `cmd.exe`, which read `&`, `|`, `^` and `%` in a file name as its own syntax. PowerShell, `rundll32.exe` and `wslview` remain.
 - Release archives carry a build provenance attestation: `gh attestation verify <zip> --repo rbx-forge/rbx-open`. The build jobs run with read access only, and the publishing job alone may write.
 
