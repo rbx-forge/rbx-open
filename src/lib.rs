@@ -612,10 +612,11 @@ fn launch(target: &str) -> Result<Handoff> {
 
 /// Start `explorer.exe` on one target and wait for it to hand the target off.
 ///
-/// Only a failure to start is an error. Its exit code says nothing:
-/// `explorer.exe` exits 1 after a hand-off that worked, so believing it would
-/// report every launch as a failure. raw_arg keeps the URI's `+`/`:` intact
-/// inside quotes.
+/// Only a failure to start is an error. Its exit code is not read: it is not
+/// a reliable sign of success (`explorer.exe` is commonly reported to exit 1
+/// after a hand-off that worked, not measured here), and believing it could
+/// report working launches as failures. raw_arg keeps the URI's `+`/`:`
+/// intact inside quotes.
 #[cfg(target_os = "windows")]
 fn start_explorer(explorer: &str, target: &str) -> Result<()> {
     use std::os::windows::process::CommandExt;
