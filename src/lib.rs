@@ -14,6 +14,8 @@
 //! the Roblox client instead of opened in Studio. The `place_uri` function
 //! carries why the deep link is the form that works, and what it cannot do.
 
+#[cfg(any(target_os = "linux", test))]
+use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -694,7 +696,7 @@ fn is_wsl() -> bool {
 struct Invocation {
     program: &'static str,
     args: Vec<String>,
-    env: Vec<(&'static str, String)>,
+    env: Vec<(&'static str, OsString)>,
 }
 
 #[cfg(any(target_os = "linux", test))]
@@ -736,20 +738,20 @@ const TARGET_VAR: &str = "RBX_OPEN_TARGET";
 const START_PROCESS: &str = "Start-Process -FilePath $env:RBX_OPEN_TARGET";
 
 /// `WSLENV` with `TARGET_VAR` added, which is what lets a variable set on the
-/// Linux side reach a Windows program at all. The entries already there are
-/// kept, so whatever else the user shares still crosses over.
+/// Linux side reach a Windows program at all. What is already there is kept
+/// byte for byte, without being parsed, so whatever else the user shares
+/// still crosses over even when it is not UTF-8.
 ///
 /// It goes without a flag: the value is already in its Windows form (a path
 /// went through `wslpath`), and a `roblox-studio:` URI must not be translated.
 #[cfg(any(target_os = "linux", test))]
-fn wslenv_with_target(existing: Option<&str>) -> String {
-    let mut entries: Vec<&str> = existing
-        .unwrap_or_default()
-        .split(':')
-        .filter(|entry| !entry.is_empty() && entry.split('/').next() != Some(TARGET_VAR))
-        .collect();
-    entries.push(TARGET_VAR);
-    entries.join(":")
+fn wslenv_with_target(existing: Option<&OsStr>) -> OsString {
+    let mut wslenv = existing.map(OsStr::to_os_string).unwrap_or_default();
+    if !wslenv.is_empty() {
+        wslenv.push(":");
+    }
+    wslenv.push(TARGET_VAR);
+    wslenv
 }
 
 /// The routes from WSL to the Windows host, in the order they are tried.
@@ -759,7 +761,7 @@ fn wslenv_with_target(existing: Option<&str>) -> String {
 /// place on the Windows drive, for a distro that does not append the Windows
 /// `PATH` to its own.
 #[cfg(any(target_os = "linux", test))]
-fn windows_host_routes(target: &str, wslenv: Option<&str>) -> Vec<Invocation> {
+fn windows_host_routes(target: &str, wslenv: Option<&OsStr>) -> Vec<Invocation> {
     let mut routes = Vec::new();
 
     // PowerShell first: Start-Process handles protocol URIs and paths alike.
@@ -779,7 +781,7 @@ fn windows_host_routes(target: &str, wslenv: Option<&str>) -> Vec<Invocation> {
             ],
         );
         invocation.env = vec![
-            (TARGET_VAR, target.to_string()),
+            (TARGET_VAR, OsString::from(target)),
             ("WSLENV", wslenv_with_target(wslenv)),
         ];
         routes.push(invocation);
@@ -824,7 +826,7 @@ fn open_on_windows_host(target: &str) -> Result<()> {
         target.to_string()
     };
 
-    let wslenv = std::env::var("WSLENV").ok();
+    let wslenv = std::env::var_os("WSLENV");
     if windows_host_routes(&target, wslenv.as_deref())
         .iter()
         .any(succeeded)
@@ -1018,8 +1020,8 @@ mod tests {
                 }
                 assert!(!arg.contains("calc"), "{arg:?}");
             }
-            assert!(route.env.contains(&(TARGET_VAR, target.to_string())));
-            assert!(route.env.contains(&("WSLENV", TARGET_VAR.to_string())));
+            assert!(route.env.contains(&(TARGET_VAR, OsString::from(target))));
+            assert!(route.env.contains(&("WSLENV", OsString::from(TARGET_VAR))));
         }
     }
 
@@ -1050,16 +1052,39 @@ mod tests {
     #[test]
     fn wslenv_gains_the_target_and_keeps_the_rest() {
         assert_eq!(wslenv_with_target(None), TARGET_VAR);
-        assert_eq!(wslenv_with_target(Some("")), TARGET_VAR);
+        assert_eq!(wslenv_with_target(Some(OsStr::new(""))), TARGET_VAR);
         assert_eq!(
-            wslenv_with_target(Some("WT_SESSION:USERPROFILE/p")),
-            format!("WT_SESSION:USERPROFILE/p:{TARGET_VAR}")
+            wslenv_with_target(Some(OsStr::new("WT_SESSION:USERPROFILE/p"))),
+            OsString::from(format!("WT_SESSION:USERPROFILE/p:{TARGET_VAR}"))
         );
-        // A `/p` of our own would translate a URI as if it were a path.
-        assert_eq!(
-            wslenv_with_target(Some(&format!("{TARGET_VAR}/p:WT_SESSION"))),
-            format!("WT_SESSION:{TARGET_VAR}")
-        );
+    }
+
+    /// A value that is not valid UTF-8, the user's own business, is kept as
+    /// it is rather than dropped along with every entry beside it.
+    #[test]
+    fn a_wslenv_that_is_not_utf8_is_kept() {
+        let existing = not_utf8();
+        assert!(existing.to_str().is_none());
+        let mut expected = existing.clone();
+        expected.push(format!(":{TARGET_VAR}"));
+        assert_eq!(wslenv_with_target(Some(&existing)), expected);
+    }
+
+    fn not_utf8() -> OsString {
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            OsStr::from_bytes(b"WT_\xFF:USERPROFILE/p").to_os_string()
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::ffi::OsStringExt;
+            // A lone surrogate: valid in a Windows string, not in UTF-8.
+            let mut wide: Vec<u16> = "WT_".encode_utf16().collect();
+            wide.push(0xD800);
+            wide.extend(":USERPROFILE/p".encode_utf16());
+            OsString::from_wide(&wide)
+        }
     }
 
     fn exit_status(code: u8) -> std::process::ExitStatus {
