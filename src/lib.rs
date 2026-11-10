@@ -557,29 +557,32 @@ fn launch(target: &str) -> Result<()> {
     #[cfg(target_os = "windows")]
     {
         // Hand the URI to `explorer`, which delegates protocol-URI launches to
-        // the running desktop shell, and WAIT for that command to finish before
+        // the running desktop shell, and WAIT for it to finish before
         // returning. Both details matter when this tool runs under a launcher
         // that tears down its child process tree on exit (e.g. the rokit
         // trampoline): a fire-and-forget `.spawn()` lets the launcher kill the
         // helper process before the hand-off to the shell completes, so Studio
         // never appears. Blocking on `.status()` until `explorer` has handed the
-        // URI off (then letting the desktop shell start Studio out-of-tree) is
-        // exactly what the proven-working ROpen does (a blocking
-        // `explorer "<uri>"` via a shell). raw_arg keeps the URI's `+`/`:`
-        // intact inside quotes; CREATE_NO_WINDOW suppresses the cmd console
-        // flash.
+        // URI off lets the desktop shell start Studio out of our tree.
+        //
+        // `explorer.exe` is started by its full path, with no shell in between.
+        // A shell (`cmd /C explorer ...`) looks in the current directory before
+        // anywhere else, so an `explorer.bat` in a cloned project would run in
+        // its place. raw_arg keeps the URI's `+`/`:` intact inside quotes.
         use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        Command::new("cmd")
-            .raw_arg(format!("/C explorer \"{uri}\""))
-            .creation_flags(CREATE_NO_WINDOW)
+        let explorer = explorer_exe(std::env::var("SystemRoot").ok().as_deref());
+        Command::new(&explorer)
+            .raw_arg(explorer_arg(uri))
             .status()
-            .context("Failed to launch Roblox")?;
+            .with_context(|| format!("Failed to start {explorer}"))?;
     }
 
     #[cfg(target_os = "macos")]
     {
-        Command::new("open")
+        // By its full path, like `explorer.exe` on Windows: `open` is part of
+        // macOS and always lives there, so a `PATH` lookup can only find
+        // something else.
+        Command::new(MACOS_OPEN)
             .arg(uri)
             .spawn()
             .context("Failed to launch Roblox")?;
@@ -598,6 +601,46 @@ fn launch(target: &str) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// The macOS opener. Not looked up in `PATH`, for the reason `explorer_exe`
+/// gives.
+#[cfg(any(target_os = "macos", test))]
+const MACOS_OPEN: &str = "/usr/bin/open";
+
+/// Where `explorer.exe` is, from the `SystemRoot` environment variable.
+///
+/// A value that is missing, empty or not absolute falls back to `C:\Windows`:
+/// a relative one would be resolved against the current directory, which is
+/// the lookup this function exists to avoid.
+#[cfg(any(target_os = "windows", test))]
+fn explorer_exe(system_root: Option<&str>) -> String {
+    const DEFAULT_ROOT: &str = r"C:\Windows";
+    let root = system_root
+        .map(|root| root.trim_end_matches(['\\', '/']))
+        .filter(|root| is_absolute_windows_path(root))
+        .unwrap_or(DEFAULT_ROOT);
+    format!(r"{root}\explorer.exe")
+}
+
+/// `C:\...` or `\\server\...`, spelled out rather than asked of `Path`, which
+/// answers for the platform it was compiled on.
+#[cfg(any(target_os = "windows", test))]
+fn is_absolute_windows_path(path: &str) -> bool {
+    let bytes = path.as_bytes();
+    let drive = bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && matches!(bytes[2], b'\\' | b'/');
+    drive || path.starts_with(r"\\")
+}
+
+/// `explorer.exe`'s whole command line. It does not split its arguments the
+/// way most programs do, so the target goes in one quoted piece. Neither a
+/// URI built here nor a Windows path can contain a `"`.
+#[cfg(any(target_os = "windows", test))]
+fn explorer_arg(target: &str) -> String {
+    format!("\"{target}\"")
 }
 
 /// Whether this Linux is really a Windows machine wearing a kernel.
@@ -799,6 +842,50 @@ mod tests {
         ] {
             assert_eq!(without_verbatim_prefix(path), path);
         }
+    }
+
+    /// A bare `explorer`, or one found through a shell, can be an
+    /// `explorer.bat` sitting in the current directory.
+    #[test]
+    fn explorer_is_started_by_its_full_path() {
+        assert_eq!(
+            explorer_exe(Some(r"D:\Windows")),
+            r"D:\Windows\explorer.exe"
+        );
+        assert_eq!(
+            explorer_exe(Some(r"C:\WINDOWS\")),
+            r"C:\WINDOWS\explorer.exe"
+        );
+    }
+
+    #[test]
+    fn a_missing_or_relative_system_root_falls_back_to_the_default_one() {
+        for root in [
+            None,
+            Some(""),
+            Some("Windows"),
+            Some(r".\Windows"),
+            Some("C:"),
+        ] {
+            assert_eq!(explorer_exe(root), r"C:\Windows\explorer.exe", "{root:?}");
+        }
+    }
+
+    #[test]
+    fn explorer_gets_the_target_in_one_quoted_piece() {
+        assert_eq!(
+            explorer_arg("roblox-studio:1+task:EditPlace+placeId:123+universeId:0"),
+            "\"roblox-studio:1+task:EditPlace+placeId:123+universeId:0\""
+        );
+        assert_eq!(
+            explorer_arg(r"C:\My Games\place.rbxl"),
+            "\"C:\\My Games\\place.rbxl\""
+        );
+    }
+
+    #[test]
+    fn the_macos_opener_is_not_looked_up_in_path() {
+        assert!(MACOS_OPEN.starts_with('/'), "{MACOS_OPEN}");
     }
 
     #[test]

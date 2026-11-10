@@ -82,7 +82,7 @@ The signed-in Studio account has no edit rights on that place, and Studio opened
 
 ## How it works
 
-The tool hands Studio a `roblox-studio:1+task:EditPlace+placeId:<id>` link: through `explorer` on Windows, `open` on macOS, `xdg-open` on Linux (and the Windows side under WSL). A file on disk is recognised by its extension and passed to the system's opener.
+The tool hands Studio a `roblox-studio:1+task:EditPlace+placeId:<id>` link: through `explorer.exe` on Windows, `open` on macOS, `xdg-open` on Linux (and the Windows side under WSL). A file on disk is recognised by its extension and passed to the system's opener.
 
 ## Prior art
 
