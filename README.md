@@ -66,7 +66,8 @@ places.main = 345678901234567
 - `--file <path>`: a place file whose name has no `.rbxl` / `.rbxlx` extension
 - `--new`: a new place from a template; `--baseplate` takes the stock one, `--template <id>` names one
 - `--play`: join the place in the Roblox client instead of opening it in Studio
-- `--cookie <value>`: `.ROBLOSECURITY` for the `--universe-id` listing, or `RBX_COOKIE`; that listing answers without one
+
+No option takes a credential: the `--universe-id` listing and the template list answer without one.
 
 ## Playing instead of editing
 
