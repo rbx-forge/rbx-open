@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-10
+
 ### Removed
 
 - `--cookie` and `RBX_COOKIE`. The value was sent as the whole `Cookie` header, without `.ROBLOSECURITY=`, so it authenticated nothing, and the `--universe-id` listing it was for answers without a credential.
