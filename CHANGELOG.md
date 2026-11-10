@@ -8,6 +8,7 @@
 
 ### Fixed
 
+- Under WSL a place file whose name holds `[`, `]`, `*`, `?` or a backtick opens that file, not another one its name matches as a pattern (`place[1].rbxl` opened `place1.rbxl`). The path is escaped before `Start-Process` reads it; a link is passed unescaped.
 - A launcher that fails is an error, with a non-zero exit, instead of a success line. macOS waits for `open` and reads its exit code; on Linux and WSL a route that exits non-zero counts as one that did not work, so the next is tried. On Windows a failure to start `explorer.exe` is reported; its exit code is not read, since it exits 1 after a hand-off that worked.
 - A place file on a network share opens on Windows: Studio gets `\\server\share\dir\place.rbxl`, not `UNC\server\share\dir\place.rbxl`.
 
