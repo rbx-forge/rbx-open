@@ -768,12 +768,10 @@ fn windows_host_routes(target: &str, wslenv: Option<&str>) -> Vec<Invocation> {
         ));
     }
 
-    // `start` reads its first quoted argument as a window title, so it needs a
-    // throwaway one before the target or it opens a console instead.
-    for cmd in ["cmd.exe", "/mnt/c/Windows/System32/cmd.exe"] {
-        routes.push(Invocation::new(cmd, &["/c", "start", "rbx-open", target]));
-    }
-
+    // No `cmd.exe /c start` route: cmd reads `&`, `|`, `^` and `%` in the
+    // target as its own syntax, which a file name can hold. It would add
+    // nothing besides: cmd.exe sits beside rundll32.exe in System32, under
+    // the same two names, so when one is out of reach so is the other.
     routes.push(Invocation::new("wslview", &[target]));
     routes
 }
@@ -981,6 +979,20 @@ mod tests {
             }
             assert!(route.env.contains(&(TARGET_VAR, target.to_string())));
             assert!(route.env.contains(&("WSLENV", TARGET_VAR.to_string())));
+        }
+    }
+
+    /// A shell would read `&` in `a&b.rbxl` as "then run b.rbxl". Only
+    /// PowerShell runs, and it gets the target as a variable.
+    #[test]
+    fn no_route_hands_the_target_to_a_shell() {
+        let target = r"\\wsl.localhost\Ubuntu\home\dev\a&b^c%PATH%.rbxl";
+        for route in windows_host_routes(target, None) {
+            let program = route.program.to_ascii_lowercase();
+            assert!(!program.ends_with("cmd.exe"), "{}", route.program);
+            if program.ends_with("powershell.exe") {
+                assert!(!route.args.iter().any(|arg| arg.contains(target)));
+            }
         }
     }
 
