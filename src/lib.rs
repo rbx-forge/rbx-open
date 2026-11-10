@@ -582,9 +582,14 @@ fn launch(target: &str) -> Result<()> {
         // or has nothing to launch at all. `xdg-open` is tried first anyway: a
         // desktop Linux user with Studio under Wine or Proton has an
         // association for it, and that is theirs to keep.
-        if is_wsl() || !succeeded(&Invocation::new("xdg-open", &[uri])) {
-            open_on_windows_host(uri)?;
+        let mut tried = Vec::new();
+        if !is_wsl() {
+            match first_route_that_works(&[Route::new(&["xdg-open"], &[uri])], run_route) {
+                Ok(_) => return Ok(()),
+                Err(outcomes) => tried = outcomes,
+            }
         }
+        open_on_windows_host(uri, tried)?;
     }
 
     Ok(())
@@ -609,7 +614,7 @@ fn start_explorer(explorer: &str, target: &str) -> Result<()> {
 /// Whether a launcher whose exit code means something did its job: it
 /// started, and it exited 0. Anything else is the error the success line
 /// would otherwise have printed over.
-#[cfg(any(not(target_os = "windows"), test))]
+#[cfg(any(target_os = "macos", test))]
 fn handed_off(program: &str, status: std::io::Result<std::process::ExitStatus>) -> Result<()> {
     let status = status.with_context(|| format!("Failed to start {program}"))?;
     if !status.success() {
@@ -689,40 +694,95 @@ fn is_wsl() -> bool {
         .unwrap_or(false)
 }
 
-/// One program to start: its name or path, its arguments, and what it needs
-/// added to its environment.
+/// One way to hand the target over: a program, under each name it may be
+/// reached by, its arguments, and what it needs added to its environment.
 #[cfg(any(target_os = "linux", test))]
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct Invocation {
-    program: &'static str,
+struct Route {
+    /// The same program, by name first, then at its usual place on the
+    /// Windows drive for a distro that does not append the Windows `PATH` to
+    /// its own. A later name is tried only when the one before was not found:
+    /// a program that started and failed would only start, and fail, again.
+    programs: Vec<&'static str>,
     args: Vec<String>,
     env: Vec<(&'static str, OsString)>,
 }
 
 #[cfg(any(target_os = "linux", test))]
-impl Invocation {
-    fn new(program: &'static str, args: &[&str]) -> Self {
+impl Route {
+    fn new(programs: &[&'static str], args: &[&str]) -> Self {
         Self {
-            program,
+            programs: programs.to_vec(),
             args: args.iter().map(|arg| arg.to_string()).collect(),
             env: Vec::new(),
         }
     }
 }
 
-/// Did the program start, and say it worked? Either failure sends the caller
-/// to the next route: a program that is missing, and one that ran and could
-/// not open the target (`xdg-open` with nothing registered for the link,
-/// `Start-Process` with no app for it), are both a route that did not work.
+/// Run routes in order until one starts and exits 0, and return it.
+///
+/// Otherwise every attempt is returned, one line each (the program, and its
+/// exit status or why it did not start), for the error to show. A program
+/// that is missing and one that ran and could not open the target
+/// (`xdg-open` with nothing registered for the link, `Start-Process` with no
+/// app for it) both send the search on to the next route.
+///
+/// `run` starts one program of one route. It is a parameter so that the
+/// order of attempts is tested without starting anything.
+#[cfg(any(target_os = "linux", test))]
+fn first_route_that_works(
+    routes: &[Route],
+    mut run: impl FnMut(&str, &Route) -> std::io::Result<std::process::ExitStatus>,
+) -> std::result::Result<&Route, Vec<String>> {
+    let mut tried = Vec::new();
+    for route in routes {
+        for program in &route.programs {
+            match run(program, route) {
+                Ok(status) if status.success() => return Ok(route),
+                Ok(status) => {
+                    tried.push(format!("{program}: {status}"));
+                    break;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    tried.push(format!("{program}: not found"));
+                }
+                Err(error) => {
+                    tried.push(format!("{program}: could not start ({error})"));
+                    break;
+                }
+            }
+        }
+    }
+    Err(tried)
+}
+
+/// Start one program of a route, its output discarded, and wait for it.
 #[cfg(target_os = "linux")]
-fn succeeded(invocation: &Invocation) -> bool {
-    let status = Command::new(invocation.program)
-        .args(&invocation.args)
-        .envs(invocation.env.iter().map(|(key, value)| (*key, value)))
+fn run_route(program: &str, route: &Route) -> std::io::Result<std::process::ExitStatus> {
+    Command::new(program)
+        .args(&route.args)
+        .envs(route.env.iter().map(|(key, value)| (*key, value)))
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
-        .status();
-    handed_off(invocation.program, status).is_ok()
+        .status()
+}
+
+/// The error once every route has failed, with what each one did: "could not
+/// reach Studio" alone leaves the reader to guess which of five programs to
+/// look at.
+#[cfg(any(target_os = "linux", test))]
+fn no_route_worked(tried: &[String]) -> anyhow::Error {
+    let mut message = String::from("Could not reach Roblox Studio from this Linux. Tried:");
+    for line in tried {
+        message.push_str("\n  ");
+        message.push_str(line);
+    }
+    message.push_str(
+        "\nOutside WSL, `xdg-open` needs an app registered for the link: Studio has no \
+         native Linux build. Under WSL, check that interop is enabled and that Studio is \
+         installed on the Windows side.",
+    );
+    anyhow::anyhow!(message)
 }
 
 /// The environment variable that carries the target to PowerShell.
@@ -772,59 +832,53 @@ fn wslenv_with_target(existing: Option<&OsStr>) -> OsString {
 /// The routes from WSL to the Windows host, in the order they are tried.
 ///
 /// Several routes because which ones exist varies by distro and by how
-/// interop was set up. Each program is tried by name first, then at its usual
-/// place on the Windows drive, for a distro that does not append the Windows
-/// `PATH` to its own.
+/// interop was set up.
 #[cfg(any(target_os = "linux", test))]
-fn windows_host_routes(target: &str, is_file: bool, wslenv: Option<&OsStr>) -> Vec<Invocation> {
-    let mut routes = Vec::new();
+fn windows_host_routes(target: &str, is_file: bool, wslenv: Option<&OsStr>) -> Vec<Route> {
     let start = if is_file { START_FILE } else { START_URI };
 
     // PowerShell first: Start-Process handles protocol URIs and paths alike.
-    for powershell in [
-        "powershell.exe",
-        "/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe",
-    ] {
-        let mut invocation = Invocation::new(
-            powershell,
-            &[
-                "-NoProfile",
-                "-NonInteractive",
-                "-WindowStyle",
-                "Hidden",
-                "-Command",
-                start,
-            ],
-        );
-        invocation.env = vec![
-            (TARGET_VAR, OsString::from(target)),
-            ("WSLENV", wslenv_with_target(wslenv)),
-        ];
-        routes.push(invocation);
-    }
-
-    for rundll in ["rundll32.exe", "/mnt/c/Windows/System32/rundll32.exe"] {
-        routes.push(Invocation::new(
-            rundll,
-            &["url.dll,FileProtocolHandler", target],
-        ));
-    }
+    let mut powershell = Route::new(
+        &[
+            "powershell.exe",
+            "/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe",
+        ],
+        &[
+            "-NoProfile",
+            "-NonInteractive",
+            "-WindowStyle",
+            "Hidden",
+            "-Command",
+            start,
+        ],
+    );
+    powershell.env = vec![
+        (TARGET_VAR, OsString::from(target)),
+        ("WSLENV", wslenv_with_target(wslenv)),
+    ];
 
     // No `cmd.exe /c start` route: cmd reads `&`, `|`, `^` and `%` in the
     // target as its own syntax, which a file name can hold. It would add
     // nothing besides: cmd.exe sits beside rundll32.exe in System32, under
     // the same two names, so when one is out of reach so is the other.
-    routes.push(Invocation::new("wslview", &[target]));
-    routes
+    vec![
+        powershell,
+        Route::new(
+            &["rundll32.exe", "/mnt/c/Windows/System32/rundll32.exe"],
+            &["url.dll,FileProtocolHandler", target],
+        ),
+        Route::new(&["wslview"], &[target]),
+    ]
 }
 
 /// Cross from WSL to the Windows host, which is where Studio actually lives,
-/// through the first of `windows_host_routes` that works.
+/// through the first of `windows_host_routes` that works. `tried` is what
+/// already failed before this (`xdg-open`), for the error.
 ///
 /// Independent implementation; the gap it closes was
 /// pointed out by ROpen 1.3.2, which fixed the same thing in Luau.
 #[cfg(target_os = "linux")]
-fn open_on_windows_host(target: &str) -> Result<()> {
+fn open_on_windows_host(target: &str, mut tried: Vec<String>) -> Result<()> {
     // A Linux path means nothing to a Windows program. A `roblox-studio:` URI
     // is not a path and must be handed over untouched. `open_file` passes an
     // absolute path, so a leading `/` is what tells the two apart.
@@ -845,19 +899,14 @@ fn open_on_windows_host(target: &str) -> Result<()> {
     };
 
     let wslenv = std::env::var_os("WSLENV");
-    if windows_host_routes(&target, is_file, wslenv.as_deref())
-        .iter()
-        .any(succeeded)
-    {
-        return Ok(());
+    let routes = windows_host_routes(&target, is_file, wslenv.as_deref());
+    match first_route_that_works(&routes, run_route) {
+        Ok(_) => Ok(()),
+        Err(outcomes) => {
+            tried.extend(outcomes);
+            Err(no_route_worked(&tried))
+        }
     }
-
-    bail!(
-        "Could not reach Roblox Studio from this Linux. Outside WSL, `xdg-open` needs an \
-         app registered for the link: Studio has no native Linux build. Under WSL, check \
-         that interop is enabled (`powershell.exe`, `rundll32.exe` or `wslview` must be \
-         runnable) and that Studio is installed on the Windows side."
-    );
 }
 
 #[cfg(test)]
@@ -1024,11 +1073,11 @@ mod tests {
         let target = "\\\\wsl.localhost\\Ubuntu\\home\\dev\\it's \u{2018}a\u{2019} \
                       \u{201A}b\u{201B}; Remove-Item x; $(calc).rbxl";
         let routes = windows_host_routes(target, true, None);
-        let powershells: Vec<&Invocation> = routes
+        let powershells: Vec<&Route> = routes
             .iter()
-            .filter(|route| route.program.ends_with("powershell.exe"))
+            .filter(|route| route.programs.iter().all(|p| p.ends_with("powershell.exe")))
             .collect();
-        assert_eq!(powershells.len(), 2);
+        assert_eq!(powershells.len(), 1);
 
         for route in powershells {
             assert_eq!(route.args.last().map(String::as_str), Some(START_FILE));
@@ -1049,11 +1098,99 @@ mod tests {
     fn no_route_hands_the_target_to_a_shell() {
         let target = r"\\wsl.localhost\Ubuntu\home\dev\a&b^c%PATH%.rbxl";
         for route in windows_host_routes(target, true, None) {
-            let program = route.program.to_ascii_lowercase();
-            assert!(!program.ends_with("cmd.exe"), "{}", route.program);
-            if program.ends_with("powershell.exe") {
-                assert!(!route.args.iter().any(|arg| arg.contains(target)));
+            for program in &route.programs {
+                let program = program.to_ascii_lowercase();
+                assert!(!program.ends_with("cmd.exe"), "{program}");
+                if program.ends_with("powershell.exe") {
+                    assert!(!route.args.iter().any(|arg| arg.contains(target)));
+                }
             }
+        }
+    }
+
+    fn not_found() -> std::io::Error {
+        std::io::Error::new(std::io::ErrorKind::NotFound, "not found")
+    }
+
+    /// Runs `routes` against a stand-in for starting programs, and returns
+    /// the outcome and every program "started", in order. Nothing real runs.
+    fn simulate(
+        routes: &[Route],
+        mut answer: impl FnMut(&str) -> std::io::Result<std::process::ExitStatus>,
+    ) -> (
+        std::result::Result<Vec<&'static str>, Vec<String>>,
+        Vec<String>,
+    ) {
+        let mut started = Vec::new();
+        let outcome = first_route_that_works(routes, |program, _| {
+            started.push(program.to_string());
+            answer(program)
+        })
+        .map(|route| route.programs.clone());
+        (outcome, started)
+    }
+
+    /// A PowerShell that ran and exited 1 is the same binary under its full
+    /// path: running it again costs a second cold start, and maybe a second
+    /// dialog, for the same answer.
+    #[test]
+    fn a_program_that_ran_and_failed_is_not_started_again_by_its_full_path() {
+        let routes = windows_host_routes("roblox-studio:1", false, None);
+        let (outcome, started) = simulate(&routes, |_| Ok(exit_status(1)));
+        assert!(outcome.is_err());
+        assert_eq!(started, ["powershell.exe", "rundll32.exe", "wslview"]);
+    }
+
+    /// The same for a program that exists and could not be started: only
+    /// "not found" says the full path might do better.
+    #[test]
+    fn a_program_that_could_not_start_is_not_started_again_by_its_full_path() {
+        let routes = windows_host_routes("roblox-studio:1", false, None);
+        let (_, started) = simulate(&routes, |_| {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "denied",
+            ))
+        });
+        assert_eq!(started, ["powershell.exe", "rundll32.exe", "wslview"]);
+    }
+
+    #[test]
+    fn a_program_not_found_by_name_is_tried_by_its_full_path() {
+        let routes = windows_host_routes("roblox-studio:1", false, None);
+        let full = "/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe";
+        let (outcome, started) = simulate(&routes, |program| {
+            if program == full {
+                Ok(exit_status(0))
+            } else {
+                Err(not_found())
+            }
+        });
+        assert!(outcome.is_ok());
+        assert_eq!(started, ["powershell.exe", full]);
+    }
+
+    /// Each program that was tried, and how it ended, reaches the error.
+    #[test]
+    fn the_error_says_what_every_route_did() {
+        let routes = windows_host_routes("roblox-studio:1", false, None);
+        let (outcome, _) = simulate(&routes, |program| match program {
+            "powershell.exe" => Ok(exit_status(1)),
+            "wslview" => Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "denied",
+            )),
+            _ => Err(not_found()),
+        });
+        let tried = outcome.expect_err("every route failed");
+        let message = no_route_worked(&tried).to_string();
+        for expected in [
+            format!("powershell.exe: {}", exit_status(1)),
+            "rundll32.exe: not found".to_string(),
+            "/mnt/c/Windows/System32/rundll32.exe: not found".to_string(),
+            "wslview: could not start (denied)".to_string(),
+        ] {
+            assert!(message.contains(&expected), "{expected:?} in {message}");
         }
     }
 
@@ -1068,7 +1205,7 @@ mod tests {
         let routes = windows_host_routes(target, is_file, None);
         let powershell = routes
             .iter()
-            .find(|route| route.program == "powershell.exe")
+            .find(|route| route.programs[0] == "powershell.exe")
             .expect("a PowerShell route");
         powershell.args.last().expect("a -Command").clone()
     }
