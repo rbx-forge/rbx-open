@@ -597,7 +597,7 @@ fn launch(target: &str) -> Result<Handoff> {
         let mut tried = Vec::new();
         if !is_wsl() {
             match first_route_that_works(&[Route::new(&["xdg-open"], &[uri])], run_route) {
-                Ok(route) => return Ok(route.handoff()),
+                Ok(route) => return Ok(route.handoff),
                 Err(outcomes) => tried = outcomes,
             }
         }
@@ -723,10 +723,11 @@ struct Route {
     programs: Vec<&'static str>,
     args: Vec<String>,
     env: Vec<(&'static str, OsString)>,
-    /// Whether its exit code says the target was opened. `rundll32.exe`
-    /// exits 0 whatever happens to the hand-off, so a success through it
-    /// only says the target reached Windows.
-    reports_failure: bool,
+    /// What a success through this route can claim. `Opened` for a program
+    /// whose exit code reports a failure; `rundll32.exe` exits 0 whatever
+    /// happens to the hand-off, so a success through it is only
+    /// `HandedToWindows`.
+    handoff: Handoff,
 }
 
 #[cfg(any(target_os = "linux", test))]
@@ -736,16 +737,7 @@ impl Route {
             programs: programs.to_vec(),
             args: args.iter().map(|arg| arg.to_string()).collect(),
             env: Vec::new(),
-            reports_failure: true,
-        }
-    }
-
-    /// What a success through this route can claim.
-    fn handoff(&self) -> Handoff {
-        if self.reports_failure {
-            Handoff::Opened
-        } else {
-            Handoff::HandedToWindows
+            handoff: Handoff::Opened,
         }
     }
 }
@@ -952,7 +944,7 @@ fn windows_host_routes(target: &str, is_file: bool, wslenv: Option<&OsStr>) -> V
         &["rundll32.exe", "/mnt/c/Windows/System32/rundll32.exe"],
         &["url.dll,FileProtocolHandler", target],
     );
-    rundll32.reports_failure = false;
+    rundll32.handoff = Handoff::HandedToWindows;
 
     // No route through a shell. `cmd.exe /c start` reads `&`, `|`, `^` and
     // `%` in the target as its own syntax, which a file name can hold, and
@@ -995,7 +987,7 @@ fn open_on_windows_host(target: &str, mut tried: Vec<String>) -> Result<Handoff>
     let wslenv = std::env::var_os("WSLENV");
     let routes = windows_host_routes(&target, is_file, wslenv.as_deref());
     match first_route_that_works(&routes, run_route) {
-        Ok(route) => Ok(route.handoff()),
+        Ok(route) => Ok(route.handoff),
         Err(outcomes) => {
             tried.extend(outcomes);
             Err(no_route_worked(original, &tried))
@@ -1301,9 +1293,9 @@ mod tests {
         let routes = windows_host_routes("roblox-studio:1", false, None);
         let (last, others) = routes.split_last().expect("routes");
         assert_eq!(last.programs[0], "rundll32.exe");
-        assert_eq!(last.handoff(), Handoff::HandedToWindows);
+        assert_eq!(last.handoff, Handoff::HandedToWindows);
         for route in others {
-            assert_eq!(route.handoff(), Handoff::Opened, "{:?}", route.programs);
+            assert_eq!(route.handoff, Handoff::Opened, "{:?}", route.programs);
         }
     }
 
@@ -1319,13 +1311,13 @@ mod tests {
         });
         assert_eq!(outcome.expect("rundll32.exe took it")[0], "rundll32.exe");
         let route = routes.last().expect("routes");
-        let line = success_line(route.handoff(), "Opening", "place 123");
+        let line = success_line(route.handoff, "Opening", "place 123");
         assert!(line.contains("Handed place 123 to Windows"), "{line}");
         assert!(!line.contains("Opening"), "{line}");
     }
 
     #[test]
-    fn a_route_that_reports_failure_says_the_place_opened() {
+    fn an_opened_hand_off_says_the_place_opened() {
         let line = success_line(Handoff::Opened, "Opening", "place 123");
         assert!(line.contains("Opening place 123"), "{line}");
         assert!(!line.contains("Windows"), "{line}");
