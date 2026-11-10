@@ -838,20 +838,58 @@ const START_URI: &str = "Start-Process -FilePath $env:RBX_OPEN_TARGET";
 const START_FILE: &str = "Invoke-Item -LiteralPath $env:RBX_OPEN_TARGET";
 
 /// `WSLENV` with `TARGET_VAR` added, which is what lets a variable set on the
-/// Linux side reach a Windows program at all. What is already there is kept
-/// byte for byte, without being parsed, so whatever else the user shares
-/// still crosses over even when it is not UTF-8.
+/// Linux side reach a Windows program at all. Every other entry is kept byte
+/// for byte, so whatever else the user shares still crosses over even when
+/// it is not UTF-8. Empty entries, which name nothing, are dropped.
 ///
-/// It goes without a flag: the value is already in its Windows form (a path
-/// went through `wslpath`), and a `roblox-studio:` URI must not be translated.
+/// Ours goes without a flag: the value is already in its Windows form (a
+/// path went through `wslpath`), and a `roblox-studio:` URI must not be
+/// translated. An entry for it already there, with or without flags, is
+/// removed first, so a `/p` the user set cannot translate the link.
 #[cfg(any(target_os = "linux", test))]
 fn wslenv_with_target(existing: Option<&OsStr>) -> OsString {
-    let mut wslenv = existing.map(OsStr::to_os_string).unwrap_or_default();
-    if !wslenv.is_empty() {
+    let mut wslenv = OsString::new();
+    for entry in existing.map(wslenv_entries).unwrap_or_default() {
+        if entry.is_empty() || names_target_var(&entry) {
+            continue;
+        }
+        wslenv.push(entry);
         wslenv.push(":");
     }
     wslenv.push(TARGET_VAR);
     wslenv
+}
+
+/// Whether one `WSLENV` entry (`NAME` or `NAME/flags`) is `TARGET_VAR`'s. An
+/// entry that is not UTF-8 cannot be: the name is ASCII.
+#[cfg(any(target_os = "linux", test))]
+fn names_target_var(entry: &OsStr) -> bool {
+    entry
+        .to_str()
+        .is_some_and(|entry| entry.split('/').next() == Some(TARGET_VAR))
+}
+
+/// `WSLENV` split on `:`, with no entry decoded: a Unix value is bytes, a
+/// Windows one (only ever seen by the tests) UTF-16.
+#[cfg(any(target_os = "linux", test))]
+fn wslenv_entries(value: &OsStr) -> Vec<OsString> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        value
+            .as_bytes()
+            .split(|byte| *byte == b':')
+            .map(|entry| OsStr::from_bytes(entry).to_os_string())
+            .collect()
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::{OsStrExt, OsStringExt};
+        let wide: Vec<u16> = value.encode_wide().collect();
+        wide.split(|unit| *unit == u16::from(b':'))
+            .map(OsString::from_wide)
+            .collect()
+    }
 }
 
 /// The routes from WSL to the Windows host, in the order they are tried.
@@ -1340,6 +1378,28 @@ mod tests {
         assert_eq!(
             wslenv_with_target(Some(OsStr::new("WT_SESSION:USERPROFILE/p"))),
             OsString::from(format!("WT_SESSION:USERPROFILE/p:{TARGET_VAR}"))
+        );
+    }
+
+    /// A `/p` on our own variable would translate a link as if it were a
+    /// path, so an entry for it already there goes, flags and all. A name
+    /// that only starts with ours is somebody else's.
+    #[test]
+    fn an_existing_entry_for_the_target_is_replaced() {
+        for existing in [
+            format!("{TARGET_VAR}/p:WT_SESSION"),
+            format!("WT_SESSION:{TARGET_VAR}"),
+            format!("{TARGET_VAR}/up:WT_SESSION:{TARGET_VAR}"),
+        ] {
+            assert_eq!(
+                wslenv_with_target(Some(OsStr::new(&existing))),
+                OsString::from(format!("WT_SESSION:{TARGET_VAR}")),
+                "{existing}"
+            );
+        }
+        assert_eq!(
+            wslenv_with_target(Some(OsStr::new(&format!("{TARGET_VAR}2/p")))),
+            OsString::from(format!("{TARGET_VAR}2/p:{TARGET_VAR}"))
         );
     }
 
