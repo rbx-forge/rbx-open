@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- A place file on a network share opens on Windows: Studio gets `\\server\share\dir\place.rbxl`, not `UNC\server\share\dir\place.rbxl`.
+
 ### Security
 
 - Release archives carry a build provenance attestation: `gh attestation verify <zip> --repo rbx-forge/rbx-open`. The build jobs run with read access only, and the publishing job alone may write.

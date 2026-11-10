@@ -515,14 +515,38 @@ fn open_file(path: &Path) -> Result<()> {
         .canonicalize()
         .with_context(|| format!("Failed to resolve {}", path.display()))?;
 
-    // Windows canonicalize() returns a `\\?\C:\...` extended-length path, which
-    // the shell hands to Studio verbatim and Studio does not open. The prefix
-    // is stripped because it is an API detail, not part of the path.
-    let mut target = absolute.to_string_lossy().into_owned();
-    if let Some(stripped) = target.strip_prefix(r#"\\?\"#) {
-        target = stripped.to_string();
+    launch(&without_verbatim_prefix(&absolute.to_string_lossy()))
+}
+
+/// The path a Windows program reads, from the one `canonicalize()` returns.
+///
+/// Windows `canonicalize()` returns an extended-length path, which the shell
+/// hands to Studio verbatim and Studio does not open. The prefix is an API
+/// detail, not part of the path, but it is not the same prefix for every
+/// path: a drive path comes back as `\\?\C:\dir\place.rbxl`, and a network
+/// path as `\\?\UNC\server\share\dir\place.rbxl`, which has to become
+/// `\\server\share\dir\place.rbxl` again rather than lose only the `\\?\`.
+///
+/// Any other verbatim form (a volume GUID, a device) has no shorter spelling,
+/// so it is kept as it is. A path without the prefix, such as every path on
+/// macOS and Linux, is returned unchanged.
+fn without_verbatim_prefix(path: &str) -> String {
+    const VERBATIM: &str = r"\\?\";
+    const VERBATIM_UNC: &str = r"\\?\UNC\";
+
+    if path
+        .get(..VERBATIM_UNC.len())
+        .is_some_and(|start| start.eq_ignore_ascii_case(VERBATIM_UNC))
+    {
+        return format!(r"\\{}", &path[VERBATIM_UNC.len()..]);
     }
-    launch(&target)
+    if let Some(rest) = path.strip_prefix(VERBATIM) {
+        let bytes = rest.as_bytes();
+        if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
+            return rest.to_string();
+        }
+    }
+    path.to_string()
 }
 
 /// Hand one target (a `roblox-studio:` or `roblox:` URI, or a path) to the
@@ -746,6 +770,35 @@ mod tests {
             place_file_target(Some(Path::new("weird-name")), None),
             Some(PathBuf::from("weird-name"))
         );
+    }
+
+    #[test]
+    fn a_drive_path_loses_only_the_verbatim_prefix() {
+        assert_eq!(
+            without_verbatim_prefix(r"\\?\C:\games\place.rbxl"),
+            r"C:\games\place.rbxl"
+        );
+    }
+
+    /// Stripping `\\?\` alone leaves `UNC\server\share\...`, a relative path
+    /// that names nothing.
+    #[test]
+    fn a_network_path_gets_its_leading_backslashes_back() {
+        assert_eq!(
+            without_verbatim_prefix(r"\\?\UNC\server\share\dir\place.rbxl"),
+            r"\\server\share\dir\place.rbxl"
+        );
+    }
+
+    #[test]
+    fn a_path_without_a_shorter_spelling_is_kept_as_it_is() {
+        for path in [
+            r"\\server\share\dir\place.rbxl",
+            r"\\?\Volume{01234567-89ab-cdef-0123-456789abcdef}\place.rbxl",
+            "/home/user/place.rbxl",
+        ] {
+            assert_eq!(without_verbatim_prefix(path), path);
+        }
     }
 
     #[test]
