@@ -623,17 +623,27 @@ const MACOS_OPEN: &str = "/usr/bin/open";
 
 /// Where `explorer.exe` is, from the `SystemRoot` environment variable.
 ///
-/// A value that is missing, empty or not absolute falls back to `C:\Windows`:
-/// a relative one would be resolved against the current directory, which is
-/// the lookup this function exists to avoid.
+/// A valid `SystemRoot` gives the full path. A value that is missing, empty or
+/// not absolute gives the bare name instead, never a guessed drive: Windows
+/// is not always on `C:`, and a relative root would put the current directory
+/// back in front.
+///
+/// The bare name is safe because no shell resolves it. Rust's
+/// `Command::new` on Windows resolves a name that is not absolute itself,
+/// searching in order: the child's `PATH` if set explicitly (it is not here),
+/// the directory of the running executable, the system directory, the
+/// Windows directory, then the parent's `PATH`. The current directory is not
+/// on that list (std `Command::new`, "Platform-specific behavior").
+/// `explorer.exe` is found in the Windows directory.
 #[cfg(any(target_os = "windows", test))]
 fn explorer_exe(system_root: Option<&str>) -> String {
-    const DEFAULT_ROOT: &str = r"C:\Windows";
-    let root = system_root
+    match system_root
         .map(|root| root.trim_end_matches(['\\', '/']))
         .filter(|root| is_absolute_windows_path(root))
-        .unwrap_or(DEFAULT_ROOT);
-    format!(r"{root}\explorer.exe")
+    {
+        Some(root) => format!(r"{root}\explorer.exe"),
+        None => "explorer.exe".to_string(),
+    }
 }
 
 /// `C:\...` or `\\server\...`, spelled out rather than asked of `Path`, which
@@ -956,7 +966,9 @@ mod tests {
     }
 
     #[test]
-    fn a_missing_or_relative_system_root_falls_back_to_the_default_one() {
+    fn a_missing_or_relative_system_root_falls_back_to_the_bare_name() {
+        // No drive is guessed: Windows is not always on `C:`. std resolves the
+        // bare name without ever searching the current directory.
         for root in [
             None,
             Some(""),
@@ -964,7 +976,7 @@ mod tests {
             Some(r".\Windows"),
             Some("C:"),
         ] {
-            assert_eq!(explorer_exe(root), r"C:\Windows\explorer.exe", "{root:?}");
+            assert_eq!(explorer_exe(root), "explorer.exe", "{root:?}");
         }
     }
 
