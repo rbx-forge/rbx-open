@@ -824,19 +824,18 @@ const TARGET_VAR: &str = "RBX_OPEN_TARGET";
 #[cfg(any(target_os = "linux", test))]
 const START_URI: &str = "Start-Process -FilePath $env:RBX_OPEN_TARGET";
 
-/// What PowerShell runs for a file. `-FilePath` is resolved as a wildcard
-/// pattern, so `place[1].rbxl` matches, and opens, a `place1.rbxl` beside it;
-/// there is no `-LiteralPath`. Escaping the value makes the pattern match the
-/// one literal file. Measured on Windows PowerShell 5.1 with both files
-/// present: the raw path resolves to `place1.rbxl`, the escaped one to
-/// `place[1].rbxl`.
+/// What PowerShell runs for a file. Not Start-Process: its `-FilePath` is
+/// resolved as a wildcard pattern, so `place[1].rbxl` matches, and opens, a
+/// `place1.rbxl` beside it, and it has no `-LiteralPath`. `Invoke-Item
+/// -LiteralPath` opens the file with its default app and resolves nothing:
+/// brackets and backticks are part of the name. Checked on Windows
+/// PowerShell 5.1, without opening anything: `-LiteralPath` names exactly
+/// ``place[1]`x.rbxl``, and a missing file makes `-Command` exit 1.
 ///
-/// URIs are left out of it on purpose. Escaping turns the `?` of
-/// `roblox://experiences/start?placeId=...` into `` `? ``, and a URI matches
-/// no file, so Start-Process would hand that altered text to Windows as is.
+/// URIs stay with Start-Process (`START_URI`): `Invoke-Item` goes through
+/// a provider, and a `roblox-studio:` link is not a path any provider has.
 #[cfg(any(target_os = "linux", test))]
-const START_FILE: &str =
-    "Start-Process -FilePath ([Management.Automation.WildcardPattern]::Escape($env:RBX_OPEN_TARGET))";
+const START_FILE: &str = "Invoke-Item -LiteralPath $env:RBX_OPEN_TARGET";
 
 /// `WSLENV` with `TARGET_VAR` added, which is what lets a variable set on the
 /// Linux side reach a Windows program at all. What is already there is kept
@@ -863,7 +862,8 @@ fn wslenv_with_target(existing: Option<&OsStr>) -> OsString {
 fn windows_host_routes(target: &str, is_file: bool, wslenv: Option<&OsStr>) -> Vec<Route> {
     let start = if is_file { START_FILE } else { START_URI };
 
-    // PowerShell first: Start-Process handles protocol URIs and paths alike.
+    // PowerShell first, and the only route whose exit code says something:
+    // Invoke-Item opens a file, Start-Process a link.
     let mut powershell = Route::new(
         &[
             "powershell.exe",
@@ -1303,29 +1303,31 @@ mod tests {
         powershell.args.last().expect("a -Command").clone()
     }
 
-    /// `-FilePath` is a wildcard pattern: unescaped, `place[1].rbxl` opens
-    /// `place1.rbxl` when both are there.
+    /// `Start-Process -FilePath` is a wildcard pattern: `place[1].rbxl`
+    /// opens `place1.rbxl` when both are there. A file goes through
+    /// `-LiteralPath`, which resolves nothing.
     #[test]
-    fn a_file_is_escaped_for_powershell_wildcards() {
-        let command = powershell_command(r"\\wsl.localhost\Ubuntu\home\dev\place[1].rbxl", true);
+    fn a_file_is_opened_by_its_literal_path() {
+        let command = powershell_command(r"\\wsl.localhost\Ubuntu\home\dev\place[1]`x.rbxl", true);
         assert_eq!(command, START_FILE);
         assert!(
-            command.contains("[Management.Automation.WildcardPattern]::Escape("),
+            command.starts_with("Invoke-Item -LiteralPath "),
             "{command}"
         );
+        assert!(!command.contains("Start-Process"), "{command}");
     }
 
-    /// Escaping would turn the `?` in the `--play` link into `` `? ``, which
-    /// Start-Process then hands to Windows as is.
+    /// A link is not a path any PowerShell provider has, so it stays with
+    /// Start-Process.
     #[test]
-    fn a_uri_is_not_escaped() {
+    fn a_link_goes_to_start_process() {
         for uri in [
             place_uri(109876543210987, OpenIn::Studio),
             place_uri(109876543210987, OpenIn::Player),
         ] {
             let command = powershell_command(&uri, false);
             assert_eq!(command, START_URI, "{uri}");
-            assert!(!command.contains("Escape"), "{uri}");
+            assert!(command.starts_with("Start-Process -FilePath "), "{uri}");
         }
     }
 
