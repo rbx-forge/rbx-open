@@ -568,24 +568,18 @@ fn launch(target: &str) -> Result<()> {
         // `explorer.exe` is started by its full path, with no shell in between.
         // A shell (`cmd /C explorer ...`) looks in the current directory before
         // anywhere else, so an `explorer.bat` in a cloned project would run in
-        // its place. raw_arg keeps the URI's `+`/`:` intact inside quotes.
-        use std::os::windows::process::CommandExt;
+        // its place.
         let explorer = explorer_exe(std::env::var("SystemRoot").ok().as_deref());
-        Command::new(&explorer)
-            .raw_arg(explorer_arg(uri))
-            .status()
-            .with_context(|| format!("Failed to start {explorer}"))?;
+        start_explorer(&explorer, uri)?;
     }
 
     #[cfg(target_os = "macos")]
     {
         // By its full path, like `explorer.exe` on Windows: `open` is part of
         // macOS and always lives there, so a `PATH` lookup can only find
-        // something else.
-        Command::new(MACOS_OPEN)
-            .arg(uri)
-            .spawn()
-            .context("Failed to launch Roblox")?;
+        // something else. Waited for, and its exit code believed: `open` exits
+        // 1 when nothing is registered for the link or the file is missing.
+        handed_off(MACOS_OPEN, Command::new(MACOS_OPEN).arg(uri).status())?;
     }
 
     #[cfg(target_os = "linux")]
@@ -595,11 +589,39 @@ fn launch(target: &str) -> Result<()> {
         // or has nothing to launch at all. `xdg-open` is tried first anyway: a
         // desktop Linux user with Studio under Wine or Proton has an
         // association for it, and that is theirs to keep.
-        if is_wsl() || !spawned(&Invocation::new("xdg-open", &[uri])) {
+        if is_wsl() || !succeeded(&Invocation::new("xdg-open", &[uri])) {
             open_on_windows_host(uri)?;
         }
     }
 
+    Ok(())
+}
+
+/// Start `explorer.exe` on one target and wait for it to hand the target off.
+///
+/// Only a failure to start is an error. Its exit code says nothing:
+/// `explorer.exe` exits 1 after a hand-off that worked, so believing it would
+/// report every launch as a failure. raw_arg keeps the URI's `+`/`:` intact
+/// inside quotes.
+#[cfg(target_os = "windows")]
+fn start_explorer(explorer: &str, target: &str) -> Result<()> {
+    use std::os::windows::process::CommandExt;
+    Command::new(explorer)
+        .raw_arg(explorer_arg(target))
+        .status()
+        .with_context(|| format!("Failed to start {explorer}"))?;
+    Ok(())
+}
+
+/// Whether a launcher whose exit code means something did its job: it
+/// started, and it exited 0. Anything else is the error the success line
+/// would otherwise have printed over.
+#[cfg(any(not(target_os = "windows"), test))]
+fn handed_off(program: &str, status: std::io::Result<std::process::ExitStatus>) -> Result<()> {
+    let status = status.with_context(|| format!("Failed to start {program}"))?;
+    if !status.success() {
+        bail!("{program} could not open it ({status})");
+    }
     Ok(())
 }
 
@@ -685,18 +707,19 @@ impl Invocation {
     }
 }
 
-/// Did the program start at all? Distinguishes "no such binary" from "the
-/// binary ran and reported something", which is all the caller needs to decide
-/// whether to try the next one.
+/// Did the program start, and say it worked? Either failure sends the caller
+/// to the next route: a program that is missing, and one that ran and could
+/// not open the target (`xdg-open` with nothing registered for the link,
+/// `Start-Process` with no app for it), are both a route that did not work.
 #[cfg(target_os = "linux")]
-fn spawned(invocation: &Invocation) -> bool {
-    Command::new(invocation.program)
+fn succeeded(invocation: &Invocation) -> bool {
+    let status = Command::new(invocation.program)
         .args(&invocation.args)
         .envs(invocation.env.iter().map(|(key, value)| (*key, value)))
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
-        .status()
-        .is_ok()
+        .status();
+    handed_off(invocation.program, status).is_ok()
 }
 
 /// The environment variable that carries the target to PowerShell.
@@ -803,15 +826,16 @@ fn open_on_windows_host(target: &str) -> Result<()> {
     let wslenv = std::env::var("WSLENV").ok();
     if windows_host_routes(&target, wslenv.as_deref())
         .iter()
-        .any(spawned)
+        .any(succeeded)
     {
         return Ok(());
     }
 
     bail!(
-        "Could not reach Roblox Studio from this Linux. Under WSL, check that interop is \
-         enabled (`powershell.exe`, `rundll32.exe` or `wslview` must be runnable). Studio \
-         has no native Linux build."
+        "Could not reach Roblox Studio from this Linux. Outside WSL, `xdg-open` needs an \
+         app registered for the link: Studio has no native Linux build. Under WSL, check \
+         that interop is enabled (`powershell.exe`, `rundll32.exe` or `wslview` must be \
+         runnable) and that Studio is installed on the Windows side."
     );
 }
 
@@ -1019,6 +1043,49 @@ mod tests {
             wslenv_with_target(Some(&format!("{TARGET_VAR}/p:WT_SESSION"))),
             format!("WT_SESSION:{TARGET_VAR}")
         );
+    }
+
+    fn exit_status(code: u8) -> std::process::ExitStatus {
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::ExitStatusExt;
+            std::process::ExitStatus::from_raw(i32::from(code) << 8)
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::ExitStatusExt;
+            std::process::ExitStatus::from_raw(u32::from(code))
+        }
+    }
+
+    #[test]
+    fn a_launcher_that_exits_0_handed_the_target_off() {
+        assert!(handed_off("/usr/bin/open", Ok(exit_status(0))).is_ok());
+    }
+
+    /// `open` and `xdg-open` exit non-zero when nothing can open the target.
+    /// Reading only "did it start" printed a success line over that.
+    #[test]
+    fn a_launcher_that_exits_non_zero_is_an_error() {
+        let error = handed_off("/usr/bin/open", Ok(exit_status(1))).expect_err("exit 1");
+        assert!(error.to_string().contains("/usr/bin/open"), "{error}");
+    }
+
+    #[test]
+    fn a_launcher_that_cannot_start_is_an_error() {
+        let missing = std::io::Error::new(std::io::ErrorKind::NotFound, "not found");
+        let error = handed_off("xdg-open", Err(missing)).expect_err("never started");
+        assert!(error.to_string().contains("xdg-open"), "{error}");
+    }
+
+    /// Starts nothing: the path does not exist, so the spawn itself fails,
+    /// and that failure must reach the caller instead of a success line.
+    #[cfg(windows)]
+    #[test]
+    fn an_explorer_that_cannot_start_is_an_error() {
+        let missing = r"C:\rbx-open-test-does-not-exist\explorer.exe";
+        let error = start_explorer(missing, "roblox-studio:1").expect_err("no such file");
+        assert!(error.to_string().contains(missing), "{error}");
     }
 
     #[test]
