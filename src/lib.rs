@@ -729,13 +729,28 @@ fn succeeded(invocation: &Invocation) -> bool {
 #[cfg(any(target_os = "linux", test))]
 const TARGET_VAR: &str = "RBX_OPEN_TARGET";
 
-/// What PowerShell runs. The target is read from the environment, never
-/// spliced into this text: inside a quoted PowerShell string, a path is code
-/// as soon as it holds a quote PowerShell recognises, and Windows PowerShell
-/// recognises more of them than `'` (also U+2018 to U+201B, which a file name
-/// can hold). Read from a variable, the value is only ever a value.
+/// What PowerShell runs for a URI. The target is read from the environment,
+/// never spliced into this text: inside a quoted PowerShell string, a path is
+/// code as soon as it holds a quote PowerShell recognises, and Windows
+/// PowerShell recognises more of them than `'` (also U+2018 to U+201B, which
+/// a file name can hold). Read from a variable, the value is only ever a
+/// value.
 #[cfg(any(target_os = "linux", test))]
-const START_PROCESS: &str = "Start-Process -FilePath $env:RBX_OPEN_TARGET";
+const START_URI: &str = "Start-Process -FilePath $env:RBX_OPEN_TARGET";
+
+/// What PowerShell runs for a file. `-FilePath` is resolved as a wildcard
+/// pattern, so `place[1].rbxl` matches, and opens, a `place1.rbxl` beside it;
+/// there is no `-LiteralPath`. Escaping the value makes the pattern match the
+/// one literal file. Measured on Windows PowerShell 5.1 with both files
+/// present: the raw path resolves to `place1.rbxl`, the escaped one to
+/// `place[1].rbxl`.
+///
+/// URIs are left out of it on purpose. Escaping turns the `?` of
+/// `roblox://experiences/start?placeId=...` into `` `? ``, and a URI matches
+/// no file, so Start-Process would hand that altered text to Windows as is.
+#[cfg(any(target_os = "linux", test))]
+const START_FILE: &str =
+    "Start-Process -FilePath ([Management.Automation.WildcardPattern]::Escape($env:RBX_OPEN_TARGET))";
 
 /// `WSLENV` with `TARGET_VAR` added, which is what lets a variable set on the
 /// Linux side reach a Windows program at all. What is already there is kept
@@ -761,8 +776,9 @@ fn wslenv_with_target(existing: Option<&OsStr>) -> OsString {
 /// place on the Windows drive, for a distro that does not append the Windows
 /// `PATH` to its own.
 #[cfg(any(target_os = "linux", test))]
-fn windows_host_routes(target: &str, wslenv: Option<&OsStr>) -> Vec<Invocation> {
+fn windows_host_routes(target: &str, is_file: bool, wslenv: Option<&OsStr>) -> Vec<Invocation> {
     let mut routes = Vec::new();
+    let start = if is_file { START_FILE } else { START_URI };
 
     // PowerShell first: Start-Process handles protocol URIs and paths alike.
     for powershell in [
@@ -777,7 +793,7 @@ fn windows_host_routes(target: &str, wslenv: Option<&OsStr>) -> Vec<Invocation> 
                 "-WindowStyle",
                 "Hidden",
                 "-Command",
-                START_PROCESS,
+                start,
             ],
         );
         invocation.env = vec![
@@ -810,8 +826,10 @@ fn windows_host_routes(target: &str, wslenv: Option<&OsStr>) -> Vec<Invocation> 
 #[cfg(target_os = "linux")]
 fn open_on_windows_host(target: &str) -> Result<()> {
     // A Linux path means nothing to a Windows program. A `roblox-studio:` URI
-    // is not a path and must be handed over untouched.
-    let target = if target.starts_with('/') {
+    // is not a path and must be handed over untouched. `open_file` passes an
+    // absolute path, so a leading `/` is what tells the two apart.
+    let is_file = target.starts_with('/');
+    let target = if is_file {
         Command::new("wslpath")
             .args(["-w", target])
             .output()
@@ -827,7 +845,7 @@ fn open_on_windows_host(target: &str) -> Result<()> {
     };
 
     let wslenv = std::env::var_os("WSLENV");
-    if windows_host_routes(&target, wslenv.as_deref())
+    if windows_host_routes(&target, is_file, wslenv.as_deref())
         .iter()
         .any(succeeded)
     {
@@ -1005,7 +1023,7 @@ mod tests {
     fn powershell_never_parses_the_target() {
         let target = "\\\\wsl.localhost\\Ubuntu\\home\\dev\\it's \u{2018}a\u{2019} \
                       \u{201A}b\u{201B}; Remove-Item x; $(calc).rbxl";
-        let routes = windows_host_routes(target, None);
+        let routes = windows_host_routes(target, true, None);
         let powershells: Vec<&Invocation> = routes
             .iter()
             .filter(|route| route.program.ends_with("powershell.exe"))
@@ -1013,7 +1031,7 @@ mod tests {
         assert_eq!(powershells.len(), 2);
 
         for route in powershells {
-            assert_eq!(route.args.last().map(String::as_str), Some(START_PROCESS));
+            assert_eq!(route.args.last().map(String::as_str), Some(START_FILE));
             for arg in &route.args {
                 for quote in ['\'', '\u{2018}', '\u{2019}', '\u{201A}', '\u{201B}'] {
                     assert!(!arg.contains(quote), "{arg:?} holds {quote:?}");
@@ -1030,7 +1048,7 @@ mod tests {
     #[test]
     fn no_route_hands_the_target_to_a_shell() {
         let target = r"\\wsl.localhost\Ubuntu\home\dev\a&b^c%PATH%.rbxl";
-        for route in windows_host_routes(target, None) {
+        for route in windows_host_routes(target, true, None) {
             let program = route.program.to_ascii_lowercase();
             assert!(!program.ends_with("cmd.exe"), "{}", route.program);
             if program.ends_with("powershell.exe") {
@@ -1041,10 +1059,44 @@ mod tests {
 
     #[test]
     fn the_command_reads_the_variable_the_target_is_put_in() {
+        for command in [START_URI, START_FILE] {
+            assert!(command.contains(&format!("$env:{TARGET_VAR}")), "{command}");
+        }
+    }
+
+    fn powershell_command(target: &str, is_file: bool) -> String {
+        let routes = windows_host_routes(target, is_file, None);
+        let powershell = routes
+            .iter()
+            .find(|route| route.program == "powershell.exe")
+            .expect("a PowerShell route");
+        powershell.args.last().expect("a -Command").clone()
+    }
+
+    /// `-FilePath` is a wildcard pattern: unescaped, `place[1].rbxl` opens
+    /// `place1.rbxl` when both are there.
+    #[test]
+    fn a_file_is_escaped_for_powershell_wildcards() {
+        let command = powershell_command(r"\\wsl.localhost\Ubuntu\home\dev\place[1].rbxl", true);
+        assert_eq!(command, START_FILE);
         assert!(
-            START_PROCESS.ends_with(&format!("$env:{TARGET_VAR}")),
-            "{START_PROCESS}"
+            command.contains("[Management.Automation.WildcardPattern]::Escape("),
+            "{command}"
         );
+    }
+
+    /// Escaping would turn the `?` in the `--play` link into `` `? ``, which
+    /// Start-Process then hands to Windows as is.
+    #[test]
+    fn a_uri_is_not_escaped() {
+        for uri in [
+            place_uri(109876543210987, OpenIn::Studio),
+            place_uri(109876543210987, OpenIn::Player),
+        ] {
+            let command = powershell_command(&uri, false);
+            assert_eq!(command, START_URI, "{uri}");
+            assert!(!command.contains("Escape"), "{uri}");
+        }
     }
 
     /// The variable crosses to Windows only if `WSLENV` names it, and the
