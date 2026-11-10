@@ -595,7 +595,7 @@ fn launch(target: &str) -> Result<()> {
         // or has nothing to launch at all. `xdg-open` is tried first anyway: a
         // desktop Linux user with Studio under Wine or Proton has an
         // association for it, and that is theirs to keep.
-        if is_wsl() || !spawned("xdg-open", &[uri]) {
+        if is_wsl() || !spawned(&Invocation::new("xdg-open", &[uri])) {
             open_on_windows_host(uri)?;
         }
     }
@@ -664,23 +664,124 @@ fn is_wsl() -> bool {
         .unwrap_or(false)
 }
 
+/// One program to start: its name or path, its arguments, and what it needs
+/// added to its environment.
+#[cfg(any(target_os = "linux", test))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Invocation {
+    program: &'static str,
+    args: Vec<String>,
+    env: Vec<(&'static str, String)>,
+}
+
+#[cfg(any(target_os = "linux", test))]
+impl Invocation {
+    fn new(program: &'static str, args: &[&str]) -> Self {
+        Self {
+            program,
+            args: args.iter().map(|arg| arg.to_string()).collect(),
+            env: Vec::new(),
+        }
+    }
+}
+
 /// Did the program start at all? Distinguishes "no such binary" from "the
 /// binary ran and reported something", which is all the caller needs to decide
 /// whether to try the next one.
 #[cfg(target_os = "linux")]
-fn spawned(program: &str, args: &[&str]) -> bool {
-    Command::new(program)
-        .args(args)
+fn spawned(invocation: &Invocation) -> bool {
+    Command::new(invocation.program)
+        .args(&invocation.args)
+        .envs(invocation.env.iter().map(|(key, value)| (*key, value)))
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()
         .is_ok()
 }
 
-/// Cross from WSL to the Windows host, which is where Studio actually lives.
+/// The environment variable that carries the target to PowerShell.
+#[cfg(any(target_os = "linux", test))]
+const TARGET_VAR: &str = "RBX_OPEN_TARGET";
+
+/// What PowerShell runs. The target is read from the environment, never
+/// spliced into this text: inside a quoted PowerShell string, a path is code
+/// as soon as it holds a quote PowerShell recognises, and Windows PowerShell
+/// recognises more of them than `'` (also U+2018 to U+201B, which a file name
+/// can hold). Read from a variable, the value is only ever a value.
+#[cfg(any(target_os = "linux", test))]
+const START_PROCESS: &str = "Start-Process -FilePath $env:RBX_OPEN_TARGET";
+
+/// `WSLENV` with `TARGET_VAR` added, which is what lets a variable set on the
+/// Linux side reach a Windows program at all. The entries already there are
+/// kept, so whatever else the user shares still crosses over.
 ///
-/// Several routes are tried because which ones exist varies by distro and by
-/// how interop was set up. Independent implementation; the gap it closes was
+/// It goes without a flag: the value is already in its Windows form (a path
+/// went through `wslpath`), and a `roblox-studio:` URI must not be translated.
+#[cfg(any(target_os = "linux", test))]
+fn wslenv_with_target(existing: Option<&str>) -> String {
+    let mut entries: Vec<&str> = existing
+        .unwrap_or_default()
+        .split(':')
+        .filter(|entry| !entry.is_empty() && entry.split('/').next() != Some(TARGET_VAR))
+        .collect();
+    entries.push(TARGET_VAR);
+    entries.join(":")
+}
+
+/// The routes from WSL to the Windows host, in the order they are tried.
+///
+/// Several routes because which ones exist varies by distro and by how
+/// interop was set up. Each program is tried by name first, then at its usual
+/// place on the Windows drive, for a distro that does not append the Windows
+/// `PATH` to its own.
+#[cfg(any(target_os = "linux", test))]
+fn windows_host_routes(target: &str, wslenv: Option<&str>) -> Vec<Invocation> {
+    let mut routes = Vec::new();
+
+    // PowerShell first: Start-Process handles protocol URIs and paths alike.
+    for powershell in [
+        "powershell.exe",
+        "/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe",
+    ] {
+        let mut invocation = Invocation::new(
+            powershell,
+            &[
+                "-NoProfile",
+                "-NonInteractive",
+                "-WindowStyle",
+                "Hidden",
+                "-Command",
+                START_PROCESS,
+            ],
+        );
+        invocation.env = vec![
+            (TARGET_VAR, target.to_string()),
+            ("WSLENV", wslenv_with_target(wslenv)),
+        ];
+        routes.push(invocation);
+    }
+
+    for rundll in ["rundll32.exe", "/mnt/c/Windows/System32/rundll32.exe"] {
+        routes.push(Invocation::new(
+            rundll,
+            &["url.dll,FileProtocolHandler", target],
+        ));
+    }
+
+    // `start` reads its first quoted argument as a window title, so it needs a
+    // throwaway one before the target or it opens a console instead.
+    for cmd in ["cmd.exe", "/mnt/c/Windows/System32/cmd.exe"] {
+        routes.push(Invocation::new(cmd, &["/c", "start", "rbx-open", target]));
+    }
+
+    routes.push(Invocation::new("wslview", &[target]));
+    routes
+}
+
+/// Cross from WSL to the Windows host, which is where Studio actually lives,
+/// through the first of `windows_host_routes` that works.
+///
+/// Independent implementation; the gap it closes was
 /// pointed out by ROpen 1.3.2, which fixed the same thing in Luau.
 #[cfg(target_os = "linux")]
 fn open_on_windows_host(target: &str) -> Result<()> {
@@ -701,43 +802,11 @@ fn open_on_windows_host(target: &str) -> Result<()> {
         target.to_string()
     };
 
-    // PowerShell first: Start-Process handles protocol URIs and paths alike.
-    // The quote doubling is PowerShell's own escape for a single-quoted string.
-    let quoted = target.replace('\'', "''");
-    for powershell in [
-        "powershell.exe",
-        "/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe",
-    ] {
-        if spawned(
-            powershell,
-            &[
-                "-NoProfile",
-                "-NonInteractive",
-                "-WindowStyle",
-                "Hidden",
-                "-Command",
-                &format!("Start-Process '{quoted}'"),
-            ],
-        ) {
-            return Ok(());
-        }
-    }
-
-    for rundll in ["rundll32.exe", "/mnt/c/Windows/System32/rundll32.exe"] {
-        if spawned(rundll, &["url.dll,FileProtocolHandler", &target]) {
-            return Ok(());
-        }
-    }
-
-    // `start` reads its first quoted argument as a window title, so it needs a
-    // throwaway one before the target or it opens a console instead.
-    for cmd in ["cmd.exe", "/mnt/c/Windows/System32/cmd.exe"] {
-        if spawned(cmd, &["/c", "start", "rbx-open", &target]) {
-            return Ok(());
-        }
-    }
-
-    if spawned("wslview", &[&target]) {
+    let wslenv = std::env::var("WSLENV").ok();
+    if windows_host_routes(&target, wslenv.as_deref())
+        .iter()
+        .any(spawned)
+    {
         return Ok(());
     }
 
@@ -886,6 +955,58 @@ mod tests {
     #[test]
     fn the_macos_opener_is_not_looked_up_in_path() {
         assert!(MACOS_OPEN.starts_with('/'), "{MACOS_OPEN}");
+    }
+
+    /// Every quote Windows PowerShell closes a single-quoted string on, plus
+    /// what would run once one of them had: the target must reach PowerShell
+    /// as data, never inside the text it parses.
+    #[test]
+    fn powershell_never_parses_the_target() {
+        let target = "\\\\wsl.localhost\\Ubuntu\\home\\dev\\it's \u{2018}a\u{2019} \
+                      \u{201A}b\u{201B}; Remove-Item x; $(calc).rbxl";
+        let routes = windows_host_routes(target, None);
+        let powershells: Vec<&Invocation> = routes
+            .iter()
+            .filter(|route| route.program.ends_with("powershell.exe"))
+            .collect();
+        assert_eq!(powershells.len(), 2);
+
+        for route in powershells {
+            assert_eq!(route.args.last().map(String::as_str), Some(START_PROCESS));
+            for arg in &route.args {
+                for quote in ['\'', '\u{2018}', '\u{2019}', '\u{201A}', '\u{201B}'] {
+                    assert!(!arg.contains(quote), "{arg:?} holds {quote:?}");
+                }
+                assert!(!arg.contains("calc"), "{arg:?}");
+            }
+            assert!(route.env.contains(&(TARGET_VAR, target.to_string())));
+            assert!(route.env.contains(&("WSLENV", TARGET_VAR.to_string())));
+        }
+    }
+
+    #[test]
+    fn the_command_reads_the_variable_the_target_is_put_in() {
+        assert!(
+            START_PROCESS.ends_with(&format!("$env:{TARGET_VAR}")),
+            "{START_PROCESS}"
+        );
+    }
+
+    /// The variable crosses to Windows only if `WSLENV` names it, and the
+    /// user's own entries have to cross as they did before.
+    #[test]
+    fn wslenv_gains_the_target_and_keeps_the_rest() {
+        assert_eq!(wslenv_with_target(None), TARGET_VAR);
+        assert_eq!(wslenv_with_target(Some("")), TARGET_VAR);
+        assert_eq!(
+            wslenv_with_target(Some("WT_SESSION:USERPROFILE/p")),
+            format!("WT_SESSION:USERPROFILE/p:{TARGET_VAR}")
+        );
+        // A `/p` of our own would translate a URI as if it were a path.
+        assert_eq!(
+            wslenv_with_target(Some(&format!("{TARGET_VAR}/p:WT_SESSION"))),
+            format!("WT_SESSION:{TARGET_VAR}")
+        );
     }
 
     #[test]
