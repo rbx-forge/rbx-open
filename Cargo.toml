@@ -33,9 +33,9 @@ colored = "2"
 dialoguer = "0.11"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 # `rbxplace.toml` parsing, the template and universe listings, and the HTTP
-# client they go through. A branch rather than a rev: Cargo.lock pins the exact
-# commit, and `cargo update -p rbx-core` is how a fix arrives.
-rbx-core = { git = "https://github.com/rbx-forge/rbx-core", tag = "v0.1.4" }
+# client they go through. A release tag: Cargo.lock pins the commit it names,
+# and a fix arrives by moving the tag here, then `cargo update -p rbx-core`.
+rbx-core = { git = "https://github.com/rbx-forge/rbx-core", tag = "v0.2.0" }
 
 [profile.release]
 lto = "thin"

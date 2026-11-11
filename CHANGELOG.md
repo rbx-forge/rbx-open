@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **The template listing of `--new-place` and the place listing of `--universe-id` stop at a redirect to another host.** It was followed; it is now an error with the redirect's status and the host it pointed to.
+
 ## [0.2.0] - 2026-11-10
 
 ### Removed
